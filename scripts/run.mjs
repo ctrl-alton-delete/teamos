@@ -29,6 +29,7 @@
  *   --max-cycles <n>     Max cycle passes before stopping         (default: 10)
  *   --no-commit          Skip automatic git commit after each cycle
  *   --no-clerk           Skip clerk agent after each pass
+ *   --clerk-only         Run only the clerk agent, then exit
  *   --dry-run            List members with work, don't invoke agent
  *   --help               Show this help
  */
@@ -60,6 +61,7 @@ function getVersion() {
 const PRIORITY_ORDER = ['pressing', 'today', 'thisWeek', 'later'];
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes with no output → assume hung
 const MAX_RUN_MS = 60 * 60 * 1000;      // 1 hour hard stop
+const STOP_FILE = '.stop';              // create team/.stop to halt the runner
 
 // ─── Stream formatters ─────────────────────────────────────────────────────────
 
@@ -203,6 +205,15 @@ async function readTextOrEmpty(filePath) {
 	try { return await readFile(filePath, 'utf-8'); } catch { return ''; }
 }
 
+async function checkStop(teamDir) {
+	const stopFile = join(teamDir, STOP_FILE);
+	if (await pathExists(stopFile)) {
+		await unlink(stopFile).catch(() => {});
+		return true;
+	}
+	return false;
+}
+
 // ─── Member discovery ──────────────────────────────────────────────────────────
 
 async function loadMembers(teamDir) {
@@ -232,7 +243,7 @@ async function memberHasWork(memberName, priority, teamDir) {
 		try {
 			const todos = JSON.parse(await readFile(todoPath, 'utf-8'));
 			const priorityIdx = PRIORITY_ORDER.indexOf(priority);
-			if (todos.items.some(t => PRIORITY_ORDER.indexOf(t.priority) <= priorityIdx)) return true;
+			if (todos.items.some(t => t.status !== 'blocked' && PRIORITY_ORDER.indexOf(t.priority) <= priorityIdx)) return true;
 		} catch { /* ignore */ }
 	}
 
@@ -565,6 +576,7 @@ function printHelp() {
 		'  --max-cycles <n>     Max cycle passes                      (default: 10)',
 		'  --no-commit          Skip automatic git commit after each cycle',
 		'  --no-clerk           Skip clerk agent after each pass',
+		'  --clerk-only         Run only the clerk agent, then exit',
 		'  --dry-run            List members with work, don\'t invoke agent',
 		'  --help               Show this help',
 	];
@@ -579,6 +591,7 @@ function parseArgs(argv) {
 		maxCycles: 10,
 		noCommit: false,
 		noClerk: false,
+		clerkOnly: false,
 		dryRun: false,
 	};
 
@@ -602,6 +615,9 @@ function parseArgs(argv) {
 				break;
 			case '--no-clerk':
 				opts.noClerk = true;
+				break;
+			case '--clerk-only':
+				opts.clerkOnly = true;
 				break;
 			case '--dry-run':
 				opts.dryRun = true;
@@ -648,6 +664,39 @@ async function main() {
 		return;
 	}
 
+	// ── Clerk only ────────────────────────────────────────────────────────────
+
+	if (opts.clerkOnly) {
+		console.log(`\nteamos (${version}) — clerk only`);
+		const logsDir = await ensureLogsDir(teamDir);
+		const clerkLog = buildLogPath(logsDir, 'clerk', 'manual');
+
+		await writeFile(clerkLog, [
+			`Clerk run (manual)`,
+			`Agent: ${opts.agent}`,
+			`TeamOS: ${version}`,
+			`Started: ${new Date().toISOString()}`,
+			'═'.repeat(72),
+			'',
+		].join('\n'));
+
+		const clerkPrompt = await buildClerkPrompt(teamDir, null);
+		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog);
+
+		if (clerkExit !== 0) {
+			console.error(`[runner] Clerk exited with code ${clerkExit}`);
+		}
+
+		if (!opts.noCommit) {
+			if (commitChanges('clerk: manual', repoRoot)) {
+				console.log('  Clerk committed.');
+			}
+		}
+
+		console.log('\nDone — clerk only.');
+		return;
+	}
+
 	// ── Dry run ────────────────────────────────────────────────────────────────
 
 	if (opts.dryRun) {
@@ -686,6 +735,11 @@ async function main() {
 	let totalMemberRuns = 0;
 
 	while (cycleCount < opts.maxCycles && (Date.now() - startTime) < MAX_RUN_MS) {
+		if (await checkStop(teamDir)) {
+			console.log('\n[runner] Stop file detected — halting.');
+			break;
+		}
+
 		const priorityIdx = PRIORITY_ORDER.indexOf(currentPriority);
 		const membersWithWork = await getMembersWithWork(members, currentPriority, teamDir);
 
@@ -707,9 +761,15 @@ async function main() {
 
 		let lastError = null;
 
+		let stopped = false;
 		for (const member of membersWithWork) {
 			if ((Date.now() - startTime) >= MAX_RUN_MS) {
 				console.log('\n[runner] Time limit reached.');
+				break;
+			}
+			if (await checkStop(teamDir)) {
+				console.log('\n[runner] Stop file detected — halting.');
+				stopped = true;
 				break;
 			}
 
@@ -761,6 +821,8 @@ async function main() {
 				console.log('  Committed.');
 			}
 		}
+
+		if (stopped) break;
 
 		// Run clerk for cleanup
 		if (!opts.noClerk) {

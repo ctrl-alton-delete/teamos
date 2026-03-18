@@ -143,7 +143,18 @@ node teamos/scripts/run.mjs --agent cursor
 | `--max-cycles <n>` | `10` | Maximum cycle passes before stopping |
 | `--no-commit` | — | Skip automatic git commit after each cycle |
 | `--no-clerk` | — | Skip clerk agent after each pass |
+| `--clerk-only` | — | Run only the clerk agent, then exit |
 | `--dry-run` | — | List members with work, don't invoke agent |
+
+### Stopping the Runner
+
+Create a `team/.stop` file to gracefully halt the runner between members:
+
+```bash
+touch team/.stop
+```
+
+The runner checks for this file before each cycle and between each member. When found, it commits any completed work, removes the stop file, and exits.
 
 ## Priority Cascade
 
