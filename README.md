@@ -23,9 +23,13 @@ teamos/
 │   ├── cycle.md             # Rules for member cycle agents
 │   ├── clerk.md             # Rules for clerk agent
 │   └── root.md              # Section appended to host AGENTS.md
-└── templates/
-    ├── *.d.ts               # TypeScript type definitions
-    └── *-template.*         # File templates for new members
+├── templates/
+│   ├── *.d.ts               # TypeScript type definitions
+│   └── *-template.*         # File templates for new members
+└── ui/                      # Web dashboard (Svelte + Vite)
+    ├── package.json
+    ├── vite.config.ts
+    └── src/
 ```
 
 ### Workspace Structure
@@ -215,6 +219,38 @@ The auth module is ready for review.
 - **Commit per member** — Clean git history for human review between runs
 - **Clerk cleanup** — Automated housekeeping after each pass (archiving, fixing inconsistencies)
 - **Zero dependencies** — Uses only Node.js built-in modules
+
+## Web Dashboard
+
+TeamOS includes a web dashboard for viewing team status, member details, inboxes, todos, and sending messages.
+
+### Running the Dashboard
+
+```bash
+cd teamos/ui
+npm install
+npm run dev
+```
+
+The dashboard starts on `http://localhost:3003` by default.
+
+### Identity ("Me")
+
+On first launch, the dashboard prompts you to select your identity from the member list. This determines:
+- The default **From** field when composing messages
+- Visual indicators showing which member is "you" in the team grid and detail views
+
+Your identity is stored in the browser's localStorage and can be changed anytime via the dropdown in the navigation bar.
+
+### Configuration
+
+The dashboard auto-discovers the `team/` directory by resolving `../../` from the `teamos/ui/` directory (which maps to the host project root for all installation modes). Override this by setting the `TEAMOS_PROJECT_ROOT` environment variable:
+
+```bash
+TEAMOS_PROJECT_ROOT=/path/to/project npm run dev
+```
+
+If a `tickets/` directory exists at the project root (e.g. from a ticket management system like tess), the dashboard displays a ticket pipeline summary. This feature is optional and hidden when no tickets directory is found.
 
 ## Removing TeamOS
 
