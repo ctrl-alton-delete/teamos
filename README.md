@@ -35,7 +35,7 @@ team/
 ├── org.md               # Organization description
 ├── members.json         # Member manifest
 ├── projects.json        # Goals and projects
-├── news.json            # Timely information for all members
+├── memos.json           # Timely information for all members
 ├── members/
 │   └── [memberName]/
 │       ├── profile.md   # Member description
@@ -85,7 +85,6 @@ title: Software Engineer
 roles: [developer]
 active: true
 type: ai
-sequenceOrder: 1
 personality:
   openness: 8
   conscientiousness: 9
@@ -104,7 +103,6 @@ Add her to `team/members.json`:
       "name": "alice",
       "title": "Software Engineer",
       "roles": ["developer"],
-      "sequenceOrder": 1,
       "active": true,
       "type": "ai"
     }
@@ -163,7 +161,7 @@ The runner starts at the highest priority and cascades down. It only advances to
 ## Work Detection
 
 A member is given a cycle when any of these are true:
-- They have **inbox messages** (JSON files in their `inbox/` directory)
+- They have **inbox messages** (markdown files in their `inbox/` directory)
 - They have **todo items** at or above the current priority level
 - They have **schedule events** that are due
 
@@ -185,16 +183,17 @@ A unit of work can include:
 
 ## Member Communication
 
-Members communicate by dropping JSON files into each other's `inbox/` directories:
+Members communicate by dropping markdown files into each other's `inbox/` directories:
 
-```json
-{
-  "from": "alice",
-  "content": "The auth module is ready for review.",
-  "sentAt": "2026-03-13T10:00:00Z",
-  "requestResponse": true,
-  "projectCode": "AUTH"
-}
+```markdown
+---
+from: alice
+sentAt: 2026-03-13T10:00:00Z
+requestResponse: true
+projectCode: AUTH
+---
+
+The auth module is ready for review.
 ```
 
 ## Design Philosophy

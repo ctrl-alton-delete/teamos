@@ -198,7 +198,7 @@ async function createTeamScaffold(projectRoot) {
 	// Create workspace files
 	await writeIfMissing(join(teamDir, 'org.md'), DEFAULT_ORG, 'team/org.md');
 	await writeIfMissing(join(teamDir, 'members.json'), '{\n  "members": []\n}\n', 'team/members.json');
-	await writeIfMissing(join(teamDir, 'news.json'), '{\n  "items": []\n}\n', 'team/news.json');
+	await writeIfMissing(join(teamDir, 'memos.json'), '{\n  "items": []\n}\n', 'team/memos.json');
 	await writeIfMissing(join(teamDir, 'projects.json'), '{\n  "projects": []\n}\n', 'team/projects.json');
 
 	// Create .gitignore

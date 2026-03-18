@@ -209,8 +209,7 @@ async function loadMembers(teamDir) {
 	const content = await readFile(join(teamDir, 'members.json'), 'utf-8');
 	const manifest = JSON.parse(content);
 	return manifest.members
-		.filter(m => m.active && m.type === 'ai')
-		.sort((a, b) => a.sequenceOrder - b.sequenceOrder);
+		.filter(m => m.active && m.type === 'ai');
 }
 
 // ─── Work detection ────────────────────────────────────────────────────────────
@@ -223,7 +222,7 @@ async function memberHasWork(memberName, priority, teamDir) {
 	if (await pathExists(inboxDir)) {
 		try {
 			const files = await readdir(inboxDir);
-			if (files.some(f => f.endsWith('.json'))) return true;
+			if (files.some(f => f.endsWith('.md'))) return true;
 		} catch { /* ignore */ }
 	}
 
@@ -279,9 +278,9 @@ async function readInboxMessages(memberDir) {
 	const inboxDir = join(memberDir, 'inbox');
 	try {
 		const files = await readdir(inboxDir);
-		const jsonFiles = files.filter(f => f.endsWith('.json'));
+		const mdFiles = files.filter(f => f.endsWith('.md'));
 		const messages = [];
-		for (const file of jsonFiles) {
+		for (const file of mdFiles) {
 			const content = await readTextOrEmpty(join(inboxDir, file));
 			if (content) messages.push({ file, content });
 		}
@@ -296,12 +295,12 @@ async function buildCyclePrompt(member, priority, teamDir) {
 	const rulesFile = join(TEAMOS_ROOT, 'agent-rules', 'cycle.md');
 	const systemFile = join(TEAMOS_ROOT, 'README.md');
 
-	const [rules, systemDoc, orgDoc, newsDoc, projectsDoc, membersDoc,
+	const [rules, systemDoc, orgDoc, memosDoc, projectsDoc, membersDoc,
 		profile, state, todos, schedule] = await Promise.all([
 		readTextOrEmpty(rulesFile),
 		readTextOrEmpty(systemFile),
 		readTextOrEmpty(join(teamDir, 'org.md')),
-		readTextOrEmpty(join(teamDir, 'news.json')),
+		readTextOrEmpty(join(teamDir, 'memos.json')),
 		readTextOrEmpty(join(teamDir, 'projects.json')),
 		readTextOrEmpty(join(teamDir, 'members.json')),
 		readTextOrEmpty(join(memberDir, 'profile.md')),
@@ -331,9 +330,9 @@ async function buildCyclePrompt(member, priority, teamDir) {
 		'',
 		orgDoc,
 		'',
-		'## News',
+		'## Memos',
 		'',
-		newsDoc,
+		memosDoc,
 		'',
 		'## Projects',
 		'',

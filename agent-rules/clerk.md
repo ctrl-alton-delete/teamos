@@ -6,7 +6,7 @@ If an error occurred during the cycle, it will be described in the context — p
 
 ## Cleanup Tasks
 
-- Move expired or outdated items from `team/news.json` to `team/archives/`
+- Move expired or outdated items from `team/memos.json` to `team/archives/`
 - Remove events from member schedule files that are older than 1 week
 - Archive completed projects: remove from `team/projects.json` and record in `team/archives/`
 - Fix any malformed JSON files or structural inconsistencies you find
