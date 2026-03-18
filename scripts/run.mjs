@@ -745,18 +745,20 @@ async function main() {
 				console.error(`Log: ${currentLog}`);
 			}
 
-			if (!opts.noCommit) {
-				const label = `cycle(${member.name}): ${currentPriority}`;
-				if (commitChanges(label, repoRoot)) {
-					console.log('  Committed.');
-				}
-			}
-
 			console.log(`\n  Complete: ${member.name}\n`);
 
 			// Brief pause between members
 			if (membersWithWork.indexOf(member) < membersWithWork.length - 1) {
 				await new Promise(r => setTimeout(r, 500));
+			}
+		}
+
+		// Commit once for the entire cycle pass (before clerk)
+		if (!opts.noCommit) {
+			const names = membersWithWork.map(m => m.name).join(', ');
+			const label = `cycle ${cycleCount} (${currentPriority}): ${names}`;
+			if (commitChanges(label, repoRoot)) {
+				console.log('  Committed.');
 			}
 		}
 
