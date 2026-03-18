@@ -170,6 +170,25 @@ export function teamosApi(opts: ApiOptions): Plugin {
 		await unlink(join(teamDir, 'members', name, 'archives', filename));
 	}
 
+	async function archiveMemo(index: number) {
+		const memosPath = join(teamDir, 'memos.json');
+		const data = await readJson(memosPath, { items: [] });
+		const items: any[] = data.items ?? [];
+		if (index < 0 || index >= items.length) throw new Error('Invalid memo index');
+		const [memo] = items.splice(index, 1);
+		await writeFile(memosPath, JSON.stringify(data, null, '\t'), 'utf-8');
+		const archivesDir = join(teamDir, 'archives');
+		await mkdir(archivesDir, { recursive: true });
+		const slug = memo.title ? slugify(memo.title) : Date.now().toString();
+		let filename = `memo-${slug}.json`;
+		try {
+			await access(join(archivesDir, filename), constants.F_OK);
+			filename = `memo-${slug}-${Date.now().toString(36)}.json`;
+		} catch { /* no collision */ }
+		await writeFile(join(archivesDir, filename), JSON.stringify(memo, null, '\t'), 'utf-8');
+		return { archivedAs: filename };
+	}
+
 	async function getSibling(): Promise<{ name: string; url: string } | null> {
 		if (!siblingDir || !await dirExists(siblingDir)) return null;
 		return { name: 'tess', url: `http://localhost:${siblingPort}` };
@@ -202,6 +221,11 @@ export function teamosApi(opts: ApiOptions): Plugin {
 
 					if (path === '/api/memos' && method === 'GET') {
 						return json(res, await readJson(join(teamDir, 'memos.json'), { items: [] }));
+					}
+
+					if (path.match(/^\/api\/memos\/(\d+)\/archive$/) && method === 'POST') {
+						const idx = parseInt(path.match(/^\/api\/memos\/(\d+)\/archive$/)![1], 10);
+						return json(res, await archiveMemo(idx));
 					}
 
 					if (path === '/api/projects' && method === 'GET') {
