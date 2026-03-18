@@ -27,6 +27,11 @@
 
 	$effect(() => { load(); });
 
+	async function archiveMemo(index: number) {
+		await api.archiveMemo(index);
+		memos = memos.filter((_, i) => i !== index);
+	}
+
 	const hasTickets = $derived(tickets && Object.values(tickets).some(v => v > 0));
 </script>
 
@@ -53,13 +58,16 @@
 		<section class="section">
 			<h2 class="section-title">Active Memos</h2>
 			<div class="memos">
-				{#each memos as memo}
+				{#each memos as memo, i}
 					<div class="memo" class:critical={memo.importance === 'critical'}>
 						<div class="memo-header">
 							<span class="memo-title">{memo.title}</span>
-							<span class="memo-meta">
-								{memo.authorName} &middot; {new Date(memo.postedAt).toLocaleDateString()}
-							</span>
+							<div class="memo-header-right">
+								<span class="memo-meta">
+									{memo.authorName} &middot; {new Date(memo.postedAt).toLocaleDateString()}
+								</span>
+								<button class="memo-archive" onclick={() => archiveMemo(i)} title="Archive memo">Archive</button>
+							</div>
 						</div>
 						<p class="memo-content">{memo.content}</p>
 						{#if memo.projectCodes?.length}
@@ -112,7 +120,23 @@
 		margin-bottom: 0.5rem;
 	}
 	.memo-title { font-weight: 600; font-size: 0.925rem; }
+	.memo-header-right {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-shrink: 0;
+	}
 	.memo-meta { font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }
+	.memo-archive {
+		font-size: 0.75rem;
+		font-weight: 600;
+		padding: 0.2rem 0.5rem;
+		border-radius: var(--radius);
+		color: var(--text-muted);
+		border: 1px solid var(--border);
+		transition: all var(--transition);
+	}
+	.memo-archive:hover { background: var(--bg); color: var(--text); }
 	.memo-content {
 		font-size: 0.875rem;
 		color: var(--text-muted);
