@@ -26,7 +26,7 @@
 		<a class="nav-link" class:active={isCompose} href="#/compose">Compose</a>
 	</div>
 	{#if sibling}
-		<a class="sibling-link" href={sibling.url} target="_blank">
+		<a class="sibling-link" href={sibling.url}>
 			{sibling.name} →
 		</a>
 	{/if}

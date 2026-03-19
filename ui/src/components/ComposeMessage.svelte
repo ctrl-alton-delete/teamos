@@ -196,7 +196,7 @@
 	.recipient:hover { border-color: var(--primary); color: var(--text); }
 	.recipient.selected {
 		background: var(--primary);
-		color: white;
+		color: var(--on-primary);
 		border-color: var(--primary);
 	}
 	.recipient-type { font-size: 0.7rem; opacity: 0.7; }
@@ -236,7 +236,7 @@
 	}
 	.btn-primary {
 		background: var(--primary);
-		color: white;
+		color: var(--on-primary);
 	}
 	.btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
 	.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }

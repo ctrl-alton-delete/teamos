@@ -35,7 +35,7 @@
 		<span class="total-label">total</span>
 	</div>
 	{#if siblingUrl}
-		<a class="open-link" href={siblingUrl} target="_blank">Open Tess →</a>
+		<a class="open-link" href={siblingUrl}>Open Tess →</a>
 	{/if}
 </div>
 

@@ -116,6 +116,28 @@
 	}
 
 	const todoGroups = $derived(detail ? groupByPriority(detail.todos.items) : []);
+	let editingState = $state(false);
+	let stateText = $state('');
+	let savingState = $state(false);
+
+	function startEditState() {
+		stateText = detail?.state ?? '';
+		editingState = true;
+	}
+
+	async function saveState() {
+		if (!detail) return;
+		savingState = true;
+		await api.updateState(name, stateText);
+		detail.state = stateText;
+		editingState = false;
+		savingState = false;
+	}
+
+	function cancelEditState() {
+		editingState = false;
+	}
+
 	const profileMeta = $derived(detail?.profile.meta ?? {});
 </script>
 
@@ -263,7 +285,18 @@
 
 		{:else if tab === 'state'}
 			<div class="state-content">
-				<pre class="state-text">{detail.state || 'No state information'}</pre>
+				{#if editingState}
+					<textarea class="state-editor" bind:value={stateText}></textarea>
+					<div class="state-actions">
+						<button class="add-btn" onclick={saveState} disabled={savingState}>
+							{savingState ? 'Saving...' : 'Save'}
+						</button>
+						<button class="cancel-btn" onclick={cancelEditState}>Cancel</button>
+					</div>
+				{:else}
+					<pre class="state-text">{detail.state || 'No state information'}</pre>
+					<button class="edit-state-btn" onclick={startEditState}>Edit</button>
+				{/if}
 			</div>
 
 		{:else if tab === 'schedule'}
@@ -341,7 +374,7 @@
 	.compose-btn {
 		padding: 0.5rem 1rem;
 		background: var(--primary);
-		color: white;
+		color: var(--on-primary);
 		border-radius: var(--radius);
 		font-weight: 600;
 		font-size: 0.875rem;
@@ -454,7 +487,7 @@
 		text-decoration: none;
 	}
 	.action-btn.reply { background: var(--primary-subtle); color: var(--primary); }
-	.action-btn.reply:hover { background: var(--primary); color: white; }
+	.action-btn.reply:hover { background: var(--primary); color: var(--on-primary); }
 	.action-btn.archive { background: var(--surface); color: var(--text-muted); border: 1px solid var(--border); }
 	.action-btn.archive:hover { background: var(--bg); color: var(--text); }
 	.action-btn.delete { color: var(--danger); }
@@ -528,6 +561,46 @@
 		white-space: pre-wrap;
 		word-wrap: break-word;
 	}
+	.state-editor {
+		width: 100%;
+		min-height: 300px;
+		padding: 0.75rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		font-family: var(--font);
+		font-size: 0.875rem;
+		line-height: 1.7;
+		background: var(--bg);
+		color: var(--text);
+		resize: vertical;
+	}
+	.state-editor:focus { outline: none; border-color: var(--primary); }
+	.state-actions {
+		display: flex;
+		gap: 0.5rem;
+		margin-top: 0.75rem;
+	}
+	.cancel-btn {
+		padding: 0.5rem 1rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		font-weight: 600;
+		font-size: 0.875rem;
+		color: var(--text-muted);
+		transition: all var(--transition);
+	}
+	.cancel-btn:hover { background: var(--bg); color: var(--text); }
+	.edit-state-btn {
+		margin-top: 0.75rem;
+		padding: 0.375rem 0.75rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		font-weight: 600;
+		font-size: 0.8rem;
+		color: var(--text-muted);
+		transition: all var(--transition);
+	}
+	.edit-state-btn:hover { background: var(--bg); color: var(--text); }
 
 	.event {
 		padding: 0.5rem 0.75rem;
@@ -578,7 +651,7 @@
 	.add-btn {
 		padding: 0.5rem 1rem;
 		background: var(--primary);
-		color: white;
+		color: var(--on-primary);
 		border-radius: var(--radius);
 		font-weight: 600;
 		font-size: 0.875rem;
@@ -600,7 +673,7 @@
 		color: var(--text-muted);
 	}
 	.todo-check:hover { border-color: var(--primary); color: var(--primary); }
-	.todo-item.done .todo-check { background: var(--primary); color: white; border-color: var(--primary); }
+	.todo-item.done .todo-check { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
 	.todo-remove {
 		margin-left: auto;
 		color: var(--text-light);

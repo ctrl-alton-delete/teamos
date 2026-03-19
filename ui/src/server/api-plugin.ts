@@ -295,8 +295,16 @@ export function teamosApi(opts: ApiOptions): Plugin {
 						}
 					}
 
-					match = path.match(/^\/api\/members\/([^/]+)\/schedule$/);
-					if (match) {
+				match = path.match(/^\/api\/members\/([^/]+)\/state$/);
+				if (match && method === 'PUT') {
+					const name = decodeURIComponent(match[1]);
+					const { state } = JSON.parse(await readBody(req));
+					await writeFile(join(teamDir, 'members', name, 'state.md'), state, 'utf-8');
+					return json(res, { ok: true });
+				}
+
+				match = path.match(/^\/api\/members\/([^/]+)\/schedule$/);
+				if (match) {
 						const name = decodeURIComponent(match[1]);
 						const schedulePath = join(teamDir, 'members', name, 'schedule.json');
 						if (method === 'GET') return json(res, await readJson(schedulePath, { events: [] }));

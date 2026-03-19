@@ -46,6 +46,8 @@ export const api = {
 	todos: (name: string) => get<{ items: unknown[] }>(`/api/members/${encodeURIComponent(name)}/todos`),
 	updateTodos: (name: string, data: { items: unknown[] }) =>
 		put(`/api/members/${encodeURIComponent(name)}/todos`, data),
+	updateState: (name: string, state: string) =>
+		put(`/api/members/${encodeURIComponent(name)}/state`, { state }),
 	schedule: (name: string) => get<{ events: unknown[] }>(`/api/members/${encodeURIComponent(name)}/schedule`),
 	updateSchedule: (name: string, data: { events: unknown[] }) =>
 		put(`/api/members/${encodeURIComponent(name)}/schedule`, data),
