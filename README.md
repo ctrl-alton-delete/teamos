@@ -144,11 +144,46 @@ node teamos/scripts/run.mjs --agent cursor
 | `--agent <name>` | `claude` | Agent adapter: `claude`, `cursor`, or `auggie` |
 | `--priority <level>` | `pressing` | Starting priority level |
 | `--member <name>` | — | Only run cycles for a specific member |
-| `--max-cycles <n>` | `10` | Maximum cycle passes before stopping |
+| `--max-cycles <n>` | `10` | Maximum cycle passes per scheduling pass |
+| `--loop` | — | Enable continuous scheduling loop |
+| `--interval <min>` | `120` | Minutes between passes (implies `--loop`) |
 | `--no-commit` | — | Skip automatic git commit after each cycle |
 | `--no-clerk` | — | Skip clerk agent after each pass |
 | `--clerk-only` | — | Run only the clerk agent, then exit |
 | `--dry-run` | — | List members with work, don't invoke agent |
+
+### Loop Mode (Built-in Scheduler)
+
+Instead of running via an external cron job, the runner can operate as a long-lived process with its own scheduling loop:
+
+```bash
+# Default: 2-hour interval
+node teamos/scripts/run.mjs --loop
+
+# Custom interval (90 minutes)
+node teamos/scripts/run.mjs --interval 90
+
+# With a specific agent
+node teamos/scripts/run.mjs --loop --agent cursor
+```
+
+In loop mode the runner:
+
+1. Runs a full priority cascade pass (no hard time limit)
+2. If the pass completes before the interval elapses, **idles** — polling every 30 seconds for new work (inbox messages, due schedule events) or a `.stop` file
+3. If new work arrives during idle, starts the next pass early
+4. If the pass overruns the interval, starts the next pass immediately
+
+**Starvation prevention** — If high-priority work dominates every pass, lower priorities get periodic forced cycles so they don't drift indefinitely:
+
+| Priority | Guaranteed cycle every |
+|---|---|
+| `pressing` | Always (cascade default) |
+| `today` | ~24 hours |
+| `thisWeek` | ~4 days |
+| `later` | ~1 week |
+
+Without `--loop`, the runner behaves as before: a single pass with a 1-hour hard time limit.
 
 ### Stopping the Runner
 
@@ -158,7 +193,7 @@ Create a `team/.stop` file to gracefully halt the runner between members:
 touch team/.stop
 ```
 
-The runner checks for this file before each cycle and between each member. When found, it commits any completed work, removes the stop file, and exits.
+The runner checks for this file before each cycle, between each member, and during idle waits. When found, it commits any completed work, removes the stop file, and exits. In loop mode, this exits the outer loop as well.
 
 ## Priority Cascade
 

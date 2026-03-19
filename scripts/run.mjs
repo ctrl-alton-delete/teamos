@@ -26,7 +26,9 @@
  *   --priority <level>   Starting priority: pressing | today | thisWeek | later
  *                                                                (default: pressing)
  *   --member <name>      Only run cycles for a specific member
- *   --max-cycles <n>     Max cycle passes before stopping         (default: 10)
+ *   --max-cycles <n>     Max cycle passes per scheduling pass     (default: 10)
+ *   --loop               Enable continuous scheduling loop
+ *   --interval <min>     Minutes between passes (default: 120, implies --loop)
  *   --no-commit          Skip automatic git commit after each cycle
  *   --no-clerk           Skip clerk agent after each pass
  *   --clerk-only         Run only the clerk agent, then exit
@@ -60,8 +62,17 @@ function getVersion() {
 
 const PRIORITY_ORDER = ['pressing', 'today', 'thisWeek', 'later'];
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes with no output → assume hung
-const MAX_RUN_MS = 60 * 60 * 1000;      // 1 hour hard stop
+const MAX_RUN_MS = 60 * 60 * 1000;      // 1 hour hard stop (single-run mode only)
 const STOP_FILE = '.stop';              // create team/.stop to halt the runner
+const DEFAULT_INTERVAL_MS = 2 * 60 * 60 * 1000;  // 2 hours between passes
+const IDLE_POLL_MS = 30 * 1000;                   // poll interval during idle wait
+
+const STARVATION_THRESHOLDS_MS = {
+	pressing: 0,
+	today:    24 * 60 * 60 * 1000,   // ~24h
+	thisWeek: 96 * 60 * 60 * 1000,   // ~4 days
+	later:    168 * 60 * 60 * 1000,  // ~1 week
+};
 
 // ─── Stream formatters ─────────────────────────────────────────────────────────
 
@@ -212,6 +223,33 @@ async function checkStop(teamDir) {
 		return true;
 	}
 	return false;
+}
+
+// ─── Scheduling helpers ────────────────────────────────────────────────────────
+
+function getStarvedPriority(lastServedAt, currentPriority) {
+	const now = Date.now();
+	const currentIdx = PRIORITY_ORDER.indexOf(currentPriority);
+	for (let i = currentIdx + 1; i < PRIORITY_ORDER.length; i++) {
+		const priority = PRIORITY_ORDER[i];
+		const threshold = STARVATION_THRESHOLDS_MS[priority];
+		if (!threshold) continue;
+		const last = lastServedAt[priority];
+		if (last == null || (now - last) >= threshold) return priority;
+	}
+	return null;
+}
+
+async function idleWait(ms, teamDir, members) {
+	const end = Date.now() + ms;
+	while (Date.now() < end) {
+		if (await checkStop(teamDir)) return 'stop';
+		if ((await getMembersWithWork(members, 'later', teamDir)).length > 0) return 'work';
+		const remaining = end - Date.now();
+		const delay = Math.min(IDLE_POLL_MS, remaining);
+		if (delay > 0) await new Promise(r => setTimeout(r, delay));
+	}
+	return 'interval';
 }
 
 // ─── Member discovery ──────────────────────────────────────────────────────────
@@ -573,7 +611,9 @@ function printHelp() {
 		'  --agent <name>       claude | auggie | cursor              (default: claude)',
 		'  --priority <level>   Starting priority level               (default: pressing)',
 		'  --member <name>      Only run cycles for a specific member',
-		'  --max-cycles <n>     Max cycle passes                      (default: 10)',
+		'  --max-cycles <n>     Max cycle passes per scheduling pass  (default: 10)',
+		'  --loop               Enable continuous scheduling loop',
+		'  --interval <min>     Minutes between passes                (default: 120, implies --loop)',
 		'  --no-commit          Skip automatic git commit after each cycle',
 		'  --no-clerk           Skip clerk agent after each pass',
 		'  --clerk-only         Run only the clerk agent, then exit',
@@ -589,6 +629,8 @@ function parseArgs(argv) {
 		priority: 'pressing',
 		member: null,
 		maxCycles: 10,
+		loop: false,
+		intervalMs: DEFAULT_INTERVAL_MS,
 		noCommit: false,
 		noClerk: false,
 		clerkOnly: false,
@@ -609,6 +651,13 @@ function parseArgs(argv) {
 				break;
 			case '--max-cycles':
 				opts.maxCycles = parseInt(argv[++i], 10);
+				break;
+			case '--loop':
+				opts.loop = true;
+				break;
+			case '--interval':
+				opts.intervalMs = parseInt(argv[++i], 10) * 60 * 1000;
+				opts.loop = true;
 				break;
 			case '--no-commit':
 				opts.noCommit = true;
@@ -636,7 +685,168 @@ function parseArgs(argv) {
 	return opts;
 }
 
-// ─── Main loop ─────────────────────────────────────────────────────────────────
+// ─── Cycle execution ───────────────────────────────────────────────────────────
+
+async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, logsDir, version, repoRoot, startTime, useTimeout }) {
+	let memberRuns = 0;
+	let lastError = null;
+	let stopped = false;
+
+	for (const member of membersWithWork) {
+		if (useTimeout && (Date.now() - startTime) >= MAX_RUN_MS) break;
+		if (await checkStop(teamDir)) { stopped = true; break; }
+
+		memberRuns++;
+		const currentLog = buildLogPath(logsDir, member.name, priority);
+
+		console.log([
+			`${'─'.repeat(72)}`,
+			`  ${member.name} (${member.title})`,
+			`  Priority: ${priority}  |  Cycle: ${cycleCount}`,
+			`  Log: ${currentLog}`,
+			`${'─'.repeat(72)}`,
+		].join('\n'));
+
+		await writeFile(currentLog, [
+			`Member: ${member.name} (${member.title})`,
+			`Priority: ${priority}`,
+			`Agent: ${opts.agent}`,
+			`TeamOS: ${version}`,
+			`Started: ${new Date().toISOString()}`,
+			'═'.repeat(72),
+			'',
+		].join('\n'));
+
+		const prompt = await buildCyclePrompt(member, priority, teamDir);
+		const exitCode = await runAgent(opts.agent, prompt, repoRoot, currentLog);
+
+		if (exitCode !== 0) {
+			lastError = `Agent exited with code ${exitCode} for member: ${member.name}`;
+			console.error(`\n${lastError}`);
+			console.error(`Log: ${currentLog}`);
+		}
+
+		console.log(`\n  Complete: ${member.name}\n`);
+
+		if (membersWithWork.indexOf(member) < membersWithWork.length - 1) {
+			await new Promise(r => setTimeout(r, 500));
+		}
+	}
+
+	if (!opts.noCommit) {
+		const names = membersWithWork.map(m => m.name).join(', ');
+		const label = `cycle ${cycleCount} (${priority}): ${names}`;
+		if (commitChanges(label, repoRoot)) {
+			console.log('  Committed.');
+		}
+	}
+
+	if (!stopped && !opts.noClerk) {
+		console.log('\n[runner] Running clerk...');
+		const clerkLog = buildLogPath(logsDir, 'clerk', priority);
+
+		await writeFile(clerkLog, [
+			`Clerk run after cycle ${cycleCount}`,
+			`Priority: ${priority}`,
+			`Agent: ${opts.agent}`,
+			`TeamOS: ${version}`,
+			`Started: ${new Date().toISOString()}`,
+			lastError ? `Error: ${lastError}` : 'No errors.',
+			'═'.repeat(72),
+			'',
+		].join('\n'));
+
+		const clerkPrompt = await buildClerkPrompt(teamDir, lastError);
+		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog);
+
+		if (clerkExit !== 0) {
+			console.error(`[runner] Clerk exited with code ${clerkExit}`);
+		}
+
+		if (!opts.noCommit) {
+			if (commitChanges(`clerk: cycle ${cycleCount} (${priority})`, repoRoot)) {
+				console.log('  Clerk committed.');
+			}
+		}
+	}
+
+	return { memberRuns, stopped };
+}
+
+// ─── Pass execution ────────────────────────────────────────────────────────────
+
+async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, lastServedAt, useTimeout }) {
+	const startTime = Date.now();
+	let currentPriority = opts.priority;
+	let cycleCount = 0;
+	let totalMemberRuns = 0;
+
+	while (cycleCount < opts.maxCycles) {
+		if (useTimeout && (Date.now() - startTime) >= MAX_RUN_MS) {
+			return { cycleCount, totalMemberRuns, stopped: false, timedOut: true };
+		}
+
+		if (await checkStop(teamDir)) {
+			return { cycleCount, totalMemberRuns, stopped: true, timedOut: false };
+		}
+
+		// Starvation check: force a cycle at a neglected priority before it drifts too far
+		const starved = getStarvedPriority(lastServedAt, currentPriority);
+		if (starved) {
+			const starvedMembers = await getMembersWithWork(members, starved, teamDir);
+			if (starvedMembers.length > 0) {
+				const last = lastServedAt[starved];
+				const agoH = last != null ? Math.round((Date.now() - last) / 3600000) : '∞';
+				console.log(`\n[runner] Priority "${starved}" starved (last served ${agoH}h ago) — injecting cycle`);
+
+				cycleCount++;
+				console.log(`\n[runner] Cycle ${cycleCount}, priority: ${starved} (starvation), ` +
+					`members: ${starvedMembers.map(m => m.name).join(', ')}`);
+
+				const result = await runCycle({
+					membersWithWork: starvedMembers, priority: starved, cycleCount,
+					opts, teamDir, logsDir, version, repoRoot, startTime, useTimeout,
+				});
+				totalMemberRuns += result.memberRuns;
+				lastServedAt[starved] = Date.now();
+
+				if (result.stopped) return { cycleCount, totalMemberRuns, stopped: true, timedOut: false };
+				continue;
+			}
+		}
+
+		const priorityIdx = PRIORITY_ORDER.indexOf(currentPriority);
+		const membersWithWork = await getMembersWithWork(members, currentPriority, teamDir);
+
+		if (membersWithWork.length === 0) {
+			if (priorityIdx < PRIORITY_ORDER.length - 1) {
+				const prev = currentPriority;
+				currentPriority = PRIORITY_ORDER[priorityIdx + 1];
+				console.log(`\n[runner] No work at "${prev}", advancing to "${currentPriority}"`);
+				continue;
+			}
+			console.log('\n[runner] All priorities processed.');
+			break;
+		}
+
+		cycleCount++;
+		console.log(`\n[runner] Cycle ${cycleCount}, priority: ${currentPriority}, ` +
+			`members: ${membersWithWork.map(m => m.name).join(', ')}`);
+
+		const result = await runCycle({
+			membersWithWork, priority: currentPriority, cycleCount,
+			opts, teamDir, logsDir, version, repoRoot, startTime, useTimeout,
+		});
+		totalMemberRuns += result.memberRuns;
+		lastServedAt[currentPriority] = Date.now();
+
+		if (result.stopped) return { cycleCount, totalMemberRuns, stopped: true, timedOut: false };
+	}
+
+	return { cycleCount, totalMemberRuns, stopped: false, timedOut: false };
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
 	const opts = parseArgs(process.argv.slice(2));
@@ -645,13 +855,11 @@ async function main() {
 	const teamDir = join(repoRoot, 'team');
 	const version = getVersion();
 
-	// Verify team/ exists
 	if (!await pathExists(teamDir)) {
 		console.error('team/ directory not found. Run `node teamos/scripts/init.mjs` first.');
 		process.exit(1);
 	}
 
-	// Load members
 	const allMembers = await loadMembers(teamDir);
 	const members = opts.member
 		? allMembers.filter(m => m.name === opts.member)
@@ -720,149 +928,81 @@ async function main() {
 	// ── Run ────────────────────────────────────────────────────────────────────
 
 	const banner = [
-		`${'═'.repeat(72)}`,
-		`  teamos (${version})`,
+		'═'.repeat(72),
+		`  teamos (${version})${opts.loop ? ' [loop mode]' : ''}`,
 		`  ${members.length} active AI member(s): ${members.map(m => m.name).join(', ')}`,
 		`  Starting priority: ${opts.priority}`,
-		`${'═'.repeat(72)}`,
-	].join('\n');
+		opts.loop ? `  Interval: ${opts.intervalMs / 60000}min` : null,
+		'═'.repeat(72),
+	].filter(Boolean).join('\n');
 	console.log(banner);
 
 	const logsDir = await ensureLogsDir(teamDir);
-	const startTime = Date.now();
-	let currentPriority = opts.priority;
-	let cycleCount = 0;
-	let totalMemberRuns = 0;
+	const lastServedAt = {};
+	for (const p of PRIORITY_ORDER) lastServedAt[p] = Date.now();
 
-	while (cycleCount < opts.maxCycles && (Date.now() - startTime) < MAX_RUN_MS) {
-		if (await checkStop(teamDir)) {
-			console.log('\n[runner] Stop file detected — halting.');
-			break;
-		}
+	if (opts.loop) {
+		let passNum = 0;
 
-		const priorityIdx = PRIORITY_ORDER.indexOf(currentPriority);
-		const membersWithWork = await getMembersWithWork(members, currentPriority, teamDir);
-
-		if (membersWithWork.length === 0) {
-			// Advance to next priority level
-			if (priorityIdx < PRIORITY_ORDER.length - 1) {
-				const prev = currentPriority;
-				currentPriority = PRIORITY_ORDER[priorityIdx + 1];
-				console.log(`\n[runner] No work at "${prev}", advancing to "${currentPriority}"`);
-				continue;
-			}
-			console.log('\n[runner] All priorities processed.');
-			break;
-		}
-
-		cycleCount++;
-		console.log(`\n[runner] Cycle ${cycleCount}, priority: ${currentPriority}, ` +
-			`members: ${membersWithWork.map(m => m.name).join(', ')}`);
-
-		let lastError = null;
-
-		let stopped = false;
-		for (const member of membersWithWork) {
-			if ((Date.now() - startTime) >= MAX_RUN_MS) {
-				console.log('\n[runner] Time limit reached.');
-				break;
-			}
+		while (true) {
 			if (await checkStop(teamDir)) {
-				console.log('\n[runner] Stop file detected — halting.');
-				stopped = true;
+				console.log('\n[runner] Stop file detected — exiting loop.');
 				break;
 			}
 
-			totalMemberRuns++;
-			const currentLog = buildLogPath(logsDir, member.name, currentPriority);
+			passNum++;
+			const passStart = Date.now();
+			console.log(`\n${'═'.repeat(72)}`);
+			console.log(`  Pass ${passNum} started at ${new Date().toISOString()}`);
+			console.log('═'.repeat(72));
 
-			const memberBanner = [
-				`${'─'.repeat(72)}`,
-				`  ${member.name} (${member.title})`,
-				`  Priority: ${currentPriority}  |  Cycle: ${cycleCount}`,
-				`  Log: ${currentLog}`,
-				`${'─'.repeat(72)}`,
-			].join('\n');
-			console.log(memberBanner);
+			const result = await runPass({
+				opts, teamDir, logsDir, version, repoRoot, members, lastServedAt,
+				useTimeout: false,
+			});
 
-			// Write log header
-			await writeFile(currentLog, [
-				`Member: ${member.name} (${member.title})`,
-				`Priority: ${currentPriority}`,
-				`Agent: ${opts.agent}`,
-				`TeamOS: ${version}`,
-				`Started: ${new Date().toISOString()}`,
-				'═'.repeat(72),
-				'',
-			].join('\n'));
+			console.log(`\n[runner] Pass ${passNum} complete — ${result.cycleCount} cycle(s), ${result.totalMemberRuns} member run(s).`);
 
-			const prompt = await buildCyclePrompt(member, currentPriority, teamDir);
-			const exitCode = await runAgent(opts.agent, prompt, repoRoot, currentLog);
-
-			if (exitCode !== 0) {
-				lastError = `Agent exited with code ${exitCode} for member: ${member.name}`;
-				console.error(`\n${lastError}`);
-				console.error(`Log: ${currentLog}`);
+			if (result.stopped) {
+				console.log('[runner] Stop file detected — exiting loop.');
+				break;
 			}
 
-			console.log(`\n  Complete: ${member.name}\n`);
+			const elapsed = Date.now() - passStart;
+			const remaining = opts.intervalMs - elapsed;
 
-			// Brief pause between members
-			if (membersWithWork.indexOf(member) < membersWithWork.length - 1) {
-				await new Promise(r => setTimeout(r, 500));
-			}
-		}
-
-		// Commit once for the entire cycle pass (before clerk)
-		if (!opts.noCommit) {
-			const names = membersWithWork.map(m => m.name).join(', ');
-			const label = `cycle ${cycleCount} (${currentPriority}): ${names}`;
-			if (commitChanges(label, repoRoot)) {
-				console.log('  Committed.');
-			}
-		}
-
-		if (stopped) break;
-
-		// Run clerk for cleanup
-		if (!opts.noClerk) {
-			console.log('\n[runner] Running clerk...');
-			const clerkLog = buildLogPath(logsDir, 'clerk', currentPriority);
-
-			await writeFile(clerkLog, [
-				`Clerk run after cycle ${cycleCount}`,
-				`Priority: ${currentPriority}`,
-				`Agent: ${opts.agent}`,
-				`TeamOS: ${version}`,
-				`Started: ${new Date().toISOString()}`,
-				lastError ? `Error: ${lastError}` : 'No errors.',
-				'═'.repeat(72),
-				'',
-			].join('\n'));
-
-			const clerkPrompt = await buildClerkPrompt(teamDir, lastError);
-			const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog);
-
-			if (clerkExit !== 0) {
-				console.error(`[runner] Clerk exited with code ${clerkExit}`);
-			}
-
-			if (!opts.noCommit) {
-				if (commitChanges(`clerk: cycle ${cycleCount} (${currentPriority})`, repoRoot)) {
-					console.log('  Clerk committed.');
+			if (remaining > 0) {
+				const mins = Math.round(remaining / 60000);
+				console.log(`[runner] Idle for ~${mins}min until next interval.`);
+				const reason = await idleWait(remaining, teamDir, members);
+				if (reason === 'stop') {
+					console.log('\n[runner] Stop file detected — exiting loop.');
+					break;
 				}
+				if (reason === 'work') {
+					console.log('[runner] New work detected — starting next pass early.');
+				}
+			} else {
+				console.log(`[runner] Pass took ${Math.round(elapsed / 60000)}min (overran interval) — starting next pass.`);
 			}
 		}
-	}
 
-	if (cycleCount >= opts.maxCycles) {
-		console.log(`\n[runner] Reached max cycles (${opts.maxCycles}).`);
-	}
-	if ((Date.now() - startTime) >= MAX_RUN_MS) {
-		console.log(`[runner] Reached time limit (${MAX_RUN_MS / 60000}min).`);
-	}
+		console.log('\nTeamOS loop ended.');
+	} else {
+		const result = await runPass({
+			opts, teamDir, logsDir, version, repoRoot, members, lastServedAt,
+			useTimeout: true,
+		});
 
-	console.log(`\nDone — ${cycleCount} cycle(s), ${totalMemberRuns} member run(s).`);
+		if (result.cycleCount >= opts.maxCycles) {
+			console.log(`\n[runner] Reached max cycles (${opts.maxCycles}).`);
+		}
+		if (result.timedOut) {
+			console.log(`[runner] Reached time limit (${MAX_RUN_MS / 60000}min).`);
+		}
+
+		console.log(`\nDone — ${result.cycleCount} cycle(s), ${result.totalMemberRuns} member run(s).`);
+	}
 }
 
 main().catch((err) => {
