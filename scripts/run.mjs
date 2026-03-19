@@ -252,6 +252,33 @@ async function idleWait(ms, teamDir, members) {
 	return 'interval';
 }
 
+async function loadSchedulerState(logsDir) {
+	try {
+		const raw = await readFile(join(logsDir, 'scheduler-state.json'), 'utf-8');
+		const state = JSON.parse(raw);
+		const now = Date.now();
+		const lastServedAt = {};
+		for (const p of PRIORITY_ORDER) {
+			const ts = state.lastServedAt?.[p];
+			lastServedAt[p] = (typeof ts === 'number' && ts > 0 && ts <= now) ? ts : now;
+		}
+		console.log('[runner] Restored scheduler state from previous run.');
+		return lastServedAt;
+	} catch {
+		const lastServedAt = {};
+		for (const p of PRIORITY_ORDER) lastServedAt[p] = Date.now();
+		return lastServedAt;
+	}
+}
+
+async function saveSchedulerState(logsDir, lastServedAt) {
+	const state = { lastServedAt, updatedAt: new Date().toISOString() };
+	await writeFile(
+		join(logsDir, 'scheduler-state.json'),
+		JSON.stringify(state, null, '\t') + '\n', 'utf-8',
+	).catch(() => {});
+}
+
 // ─── Member discovery ──────────────────────────────────────────────────────────
 
 async function loadMembers(teamDir) {
@@ -938,8 +965,7 @@ async function main() {
 	console.log(banner);
 
 	const logsDir = await ensureLogsDir(teamDir);
-	const lastServedAt = {};
-	for (const p of PRIORITY_ORDER) lastServedAt[p] = Date.now();
+	const lastServedAt = await loadSchedulerState(logsDir);
 
 	if (opts.loop) {
 		let passNum = 0;
@@ -962,6 +988,7 @@ async function main() {
 			});
 
 			console.log(`\n[runner] Pass ${passNum} complete — ${result.cycleCount} cycle(s), ${result.totalMemberRuns} member run(s).`);
+			await saveSchedulerState(logsDir, lastServedAt);
 
 			if (result.stopped) {
 				console.log('[runner] Stop file detected — exiting loop.');
@@ -993,6 +1020,7 @@ async function main() {
 			opts, teamDir, logsDir, version, repoRoot, members, lastServedAt,
 			useTimeout: true,
 		});
+		await saveSchedulerState(logsDir, lastServedAt);
 
 		if (result.cycleCount >= opts.maxCycles) {
 			console.log(`\n[runner] Reached max cycles (${opts.maxCycles}).`);

@@ -183,6 +183,8 @@ In loop mode the runner:
 | `thisWeek` | ~4 days |
 | `later` | ~1 week |
 
+Starvation state is persisted to `team/.logs/scheduler-state.json` so that interruptions and restarts don't reset the clocks. On startup the runner restores the last-served timestamps; if the file is missing or corrupted it falls back to "just now" for all priorities.
+
 Without `--loop`, the runner behaves as before: a single pass with a 1-hour hard time limit.
 
 ### Stopping the Runner
