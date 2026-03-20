@@ -601,6 +601,7 @@ async function runAgent(agentName, prompt, cwd, logFile) {
 			});
 		});
 	} finally {
+		process.stdout.write('\x1b[0m');
 		await unlink(instructionFile).catch(() => {});
 	}
 }
