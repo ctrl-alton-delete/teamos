@@ -147,6 +147,7 @@ node teamos/scripts/run.mjs --agent cursor
 | `--max-cycles <n>` | `10` | Maximum cycle passes per scheduling pass |
 | `--loop` | — | Enable continuous scheduling loop |
 | `--interval <min>` | `120` | Minutes between passes (implies `--loop`) |
+| `--push` | — | Push to remote after each commit |
 | `--no-commit` | — | Skip automatic git commit after each cycle |
 | `--no-clerk` | — | Skip clerk agent after each pass |
 | `--clerk-only` | — | Run only the clerk agent, then exit |
@@ -247,6 +248,26 @@ projectCode: AUTH
 
 The auth module is ready for review.
 ```
+
+## Acting as a Team Member (Interactive Mode)
+
+If you're an interactive agent (e.g. Cursor, Claude chat) asked to "be" a team member rather than running through the automated runner, read the following files to replicate the context the runner provides:
+
+1. **Cycle rules** — `teamos/agent-rules/cycle.md` (how to execute a cycle)
+2. **System architecture** — `teamos/README.md` (this file)
+3. **Organization** — `team/org.md`
+4. **Memos** — `team/memos.json` (timely info for all members)
+5. **Projects** — `team/projects.json`
+6. **Team roster** — `team/members.json`
+7. **Your profile** — `team/members/<you>/profile.md`
+8. **Your state** — `team/members/<you>/state.md`
+9. **Your TODOs** — `team/members/<you>/todo.json`
+10. **Your schedule** — `team/members/<you>/schedule.json`
+11. **Your inbox** — all `.md` files in `team/members/<you>/inbox/`
+
+The runner also passes a header with the current priority level and timestamp. When working interactively, default to priority `pressing` and work down the cascade as described above.
+
+Depending on your interaction, you may update your state, TODOs, and schedule. Do not commit — let the human handle that.
 
 ## Design Philosophy
 

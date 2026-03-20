@@ -29,6 +29,7 @@
  *   --max-cycles <n>     Max cycle passes per scheduling pass     (default: 10)
  *   --loop               Enable continuous scheduling loop
  *   --interval <min>     Minutes between passes (default: 120, implies --loop)
+ *   --push               Push to remote after each commit
  *   --no-commit          Skip automatic git commit after each cycle
  *   --no-clerk           Skip clerk agent after each pass
  *   --clerk-only         Run only the clerk agent, then exit
@@ -622,6 +623,18 @@ function commitChanges(message, cwd) {
 	}
 }
 
+/** Push to the remote tracking branch. Returns true on success. */
+function pushChanges(cwd) {
+	try {
+		execSync('git push', { cwd, encoding: 'utf-8', stdio: 'pipe' });
+		console.log('  Pushed.');
+		return true;
+	} catch (err) {
+		console.error(`[runner] Git push failed: ${err.stderr || err.message}`);
+		return false;
+	}
+}
+
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
 function printHelp() {
@@ -641,6 +654,7 @@ function printHelp() {
 		'  --max-cycles <n>     Max cycle passes per scheduling pass  (default: 10)',
 		'  --loop               Enable continuous scheduling loop',
 		'  --interval <min>     Minutes between passes                (default: 120, implies --loop)',
+		'  --push               Push to remote after each commit',
 		'  --no-commit          Skip automatic git commit after each cycle',
 		'  --no-clerk           Skip clerk agent after each pass',
 		'  --clerk-only         Run only the clerk agent, then exit',
@@ -658,6 +672,7 @@ function parseArgs(argv) {
 		maxCycles: 10,
 		loop: false,
 		intervalMs: DEFAULT_INTERVAL_MS,
+		push: false,
 		noCommit: false,
 		noClerk: false,
 		clerkOnly: false,
@@ -685,6 +700,9 @@ function parseArgs(argv) {
 			case '--interval':
 				opts.intervalMs = parseInt(argv[++i], 10) * 60 * 1000;
 				opts.loop = true;
+				break;
+			case '--push':
+				opts.push = true;
 				break;
 			case '--no-commit':
 				opts.noCommit = true;
@@ -765,6 +783,7 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 		const label = `cycle ${cycleCount} (${priority}): ${names}`;
 		if (commitChanges(label, repoRoot)) {
 			console.log('  Committed.');
+			if (opts.push) pushChanges(repoRoot);
 		}
 	}
 
@@ -793,6 +812,7 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 		if (!opts.noCommit) {
 			if (commitChanges(`clerk: cycle ${cycleCount} (${priority})`, repoRoot)) {
 				console.log('  Clerk committed.');
+				if (opts.push) pushChanges(repoRoot);
 			}
 		}
 	}
@@ -925,6 +945,7 @@ async function main() {
 		if (!opts.noCommit) {
 			if (commitChanges('clerk: manual', repoRoot)) {
 				console.log('  Clerk committed.');
+				if (opts.push) pushChanges(repoRoot);
 			}
 		}
 
