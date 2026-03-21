@@ -226,6 +226,27 @@ async function checkStop(teamDir) {
 	return false;
 }
 
+// ─── Time formatting ───────────────────────────────────────────────────────────
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function formatTimestamp() {
+	const now = new Date();
+	const day = DAY_NAMES[now.getDay()];
+	const month = MONTH_NAMES[now.getMonth()];
+	const date = now.getDate();
+	const year = now.getFullYear();
+	const offset = -now.getTimezoneOffset();
+	const sign = offset >= 0 ? '+' : '-';
+	const offH = String(Math.floor(Math.abs(offset) / 60)).padStart(2, '0');
+	const offM = String(Math.abs(offset) % 60).padStart(2, '0');
+	const h = String(now.getHours()).padStart(2, '0');
+	const m = String(now.getMinutes()).padStart(2, '0');
+	const isoLocal = `${year}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(date).padStart(2, '0')}T${h}:${m}:${String(now.getSeconds()).padStart(2, '0')}${sign}${offH}:${offM}`;
+	return `${day}, ${month} ${date}, ${year} ${h}:${m} local (${isoLocal})`;
+}
+
 // ─── Scheduling helpers ────────────────────────────────────────────────────────
 
 function getStarvedPriority(lastServedAt, currentPriority) {
@@ -391,17 +412,13 @@ async function buildCyclePrompt(member, priority, teamDir) {
 	const parts = [
 		`# TeamOS Cycle: ${member.name} (${member.title})`,
 		`# Priority: ${priority}`,
-		`# Time: ${new Date().toISOString()}`,
+		`# Time: ${formatTimestamp()}`,
 		`# Team directory: team/`,
 		`# Member directory: team/members/${member.name}/`,
 		'',
 		'## System Architecture',
 		'',
 		systemDoc,
-		'',
-		'## Cycle Rules',
-		'',
-		rules,
 		'',
 		'## Organization',
 		'',
@@ -449,11 +466,13 @@ async function buildCyclePrompt(member, priority, teamDir) {
 
 	parts.push(
 		'',
-		'## Instructions',
+		'## Cycle Rules',
+		'',
+		rules,
+		'',
+		'----',
 		'',
 		`Execute a cycle for **${member.name}** at priority level **${priority}**.`,
-		'Follow the cycle rules above.',
-		'Do NOT commit — the runner handles commits after you complete.',
 	);
 
 	return parts.join('\n');
@@ -465,7 +484,7 @@ async function buildClerkPrompt(teamDir, error) {
 
 	const parts = [
 		'# TeamOS Clerk',
-		`# Time: ${new Date().toISOString()}`,
+		`# Time: ${formatTimestamp()}`,
 		`# Team directory: team/`,
 		'',
 		'## System Architecture',

@@ -135,6 +135,9 @@ node teamos/scripts/run.mjs --member alice
 
 # Use a different agent
 node teamos/scripts/run.mjs --agent cursor
+
+# Don't auto-commit and keep looping
+node teamos/scripts/run.mjs --loop --no-commit
 ```
 
 ### Runner Options
