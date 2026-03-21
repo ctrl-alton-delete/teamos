@@ -2,7 +2,7 @@
 	import { api } from '../lib/api.js';
 	import { router } from '../lib/router.svelte.js';
 	import { identity } from '../lib/identity.svelte.js';
-	import type { MemberSummary, Project } from '../lib/types.js';
+	import type { MemberSummary, Project, InboxMessage } from '../lib/types.js';
 
 	let members: MemberSummary[] = $state([]);
 	let projects: Project[] = $state([]);
@@ -17,6 +17,12 @@
 	let requestResponse = $state(false);
 	let body = $state('');
 
+	let replyMessage: InboxMessage | null = $state(null);
+	let inboxOwner: string | null = $state(null);
+
+	const isReply = $derived(!!replyMessage);
+	const backPath = $derived(inboxOwner ? `/member/${inboxOwner}` : '/');
+
 	$effect(() => {
 		if (identity.name && !from) from = identity.name;
 	});
@@ -25,10 +31,21 @@
 		const [m, p] = await Promise.all([api.members(), api.projects()]);
 		members = m;
 		projects = p.projects ?? [];
-		loading = false;
 
 		const to = router.query.to;
 		if (to) selected = new Set(to.split(','));
+
+		const re = router.query.re;
+		const inbox = router.query.inbox;
+		if (re && inbox) {
+			inboxOwner = inbox;
+			try {
+				replyMessage = await api.inboxMessage(inbox, re);
+				if (replyMessage.projectCode) projectCode = replyMessage.projectCode;
+			} catch { /* original may have been archived */ }
+		}
+
+		loading = false;
 	}
 
 	$effect(() => { load(); });
@@ -56,6 +73,10 @@
 		};
 		await Promise.all([...selected].map(name => api.sendMessage(name, msg)));
 		sending = false;
+		if (isReply) {
+			router.navigate(backPath);
+			return;
+		}
 		sent = true;
 	}
 
@@ -66,13 +87,15 @@
 		requestResponse = false;
 		body = '';
 		sent = false;
+		replyMessage = null;
+		inboxOwner = null;
 	}
 </script>
 
 <div class="compose">
 	<div class="compose-header">
-		<button class="back" onclick={() => router.navigate('/')}>← Back</button>
-		<h1 class="compose-title">Compose Message</h1>
+		<button class="back" onclick={() => router.navigate(backPath)}>← Back</button>
+		<h1 class="compose-title">{isReply ? 'Reply' : 'Compose Message'}</h1>
 	</div>
 
 	{#if sent}
@@ -81,7 +104,9 @@
 			<p>Message sent to {[...selected].join(', ')}</p>
 			<div class="sent-actions">
 				<button class="btn btn-primary" onclick={reset}>Compose Another</button>
-				<button class="btn btn-ghost" onclick={() => router.navigate('/')}>Back to Dashboard</button>
+				<button class="btn btn-ghost" onclick={() => router.navigate(backPath)}>
+					{inboxOwner ? `Back to ${inboxOwner}` : 'Back to Dashboard'}
+				</button>
 			</div>
 		</div>
 	{:else if loading}
@@ -135,6 +160,20 @@
 				</label>
 			</div>
 		</div>
+
+		{#if replyMessage}
+			<div class="reply-context">
+				<div class="reply-context-header">
+					<span class="reply-label">Replying to</span>
+					<span class="reply-from">{replyMessage.from}</span>
+					<span class="reply-date">{new Date(replyMessage.sentAt).toLocaleString()}</span>
+					{#if replyMessage.projectCode}
+						<span class="reply-project">{replyMessage.projectCode}</span>
+					{/if}
+				</div>
+				<pre class="reply-body">{replyMessage.body}</pre>
+			</div>
+		{/if}
 
 		<div class="form-group">
 			<label class="label" for="body">Message</label>
@@ -244,6 +283,47 @@
 		color: var(--text-muted);
 	}
 	.btn-ghost:hover { background: var(--bg); color: var(--text); }
+
+	.reply-context {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-left: 3px solid var(--primary);
+		border-radius: var(--radius);
+		padding: 0.75rem 1rem;
+		margin-bottom: 1rem;
+	}
+	.reply-context-header {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.5rem;
+		font-size: 0.8rem;
+	}
+	.reply-label {
+		color: var(--text-muted);
+		font-weight: 500;
+	}
+	.reply-from { font-weight: 600; }
+	.reply-date { color: var(--text-muted); }
+	.reply-project {
+		font-size: 0.7rem;
+		font-weight: 600;
+		padding: 0.06rem 0.4rem;
+		border-radius: 99px;
+		background: var(--primary-subtle);
+		color: var(--primary);
+	}
+	.reply-body {
+		font-family: var(--font);
+		font-size: 0.825rem;
+		line-height: 1.5;
+		white-space: pre-wrap;
+		word-wrap: break-word;
+		color: var(--text-muted);
+		max-height: 200px;
+		overflow-y: auto;
+		margin: 0;
+	}
 
 	.sent-confirmation {
 		text-align: center;

@@ -189,6 +189,16 @@ export function teamosApi(opts: ApiOptions): Plugin {
 		return { archivedAs: filename };
 	}
 
+	async function stopCycle(): Promise<{ ok: boolean }> {
+		const stopFile = join(teamDir, '.stop');
+		await writeFile(stopFile, '', 'utf-8');
+		return { ok: true };
+	}
+
+	async function isStopPending(): Promise<boolean> {
+		return dirExists(join(teamDir, '.stop'));
+	}
+
 	async function getSibling(): Promise<{ name: string; url: string } | null> {
 		if (!siblingDir || !await dirExists(siblingDir)) return null;
 		return { name: 'tess', url: `http://localhost:${siblingPort}` };
@@ -238,6 +248,27 @@ export function teamosApi(opts: ApiOptions): Plugin {
 
 					if (path === '/api/sibling' && method === 'GET') {
 						return json(res, await getSibling());
+					}
+
+					if (path === '/api/cycle/stop' && method === 'POST') {
+						return json(res, await stopCycle());
+					}
+
+					if (path === '/api/cycle/status' && method === 'GET') {
+						return json(res, { stopPending: await isStopPending() });
+					}
+
+					if (path.match(/^\/api\/members\/([^/]+)\/inbox\/([^/]+)$/) && method === 'GET') {
+						const m = path.match(/^\/api\/members\/([^/]+)\/inbox\/([^/]+)$/);
+						if (m) {
+							const mName = decodeURIComponent(m[1]);
+							const filename = decodeURIComponent(m[2]);
+							const filePath = join(teamDir, 'members', mName, 'inbox', filename);
+							const content = await readText(filePath);
+							if (!content) return json(res, { error: 'Not found' }, 404);
+							const { meta, body: msgBody } = parseFrontmatter(content);
+							return json(res, { filename, ...meta, body: msgBody });
+						}
 					}
 
 					let match = path.match(/^\/api\/members\/([^/]+)$/);

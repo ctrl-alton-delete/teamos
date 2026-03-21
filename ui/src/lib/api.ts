@@ -57,4 +57,8 @@ export const api = {
 	projects: () => get<{ projects: Project[] }>('/api/projects'),
 	tickets: () => get<TicketCounts | null>('/api/tickets'),
 	sibling: () => get<SiblingInfo | null>('/api/sibling'),
+	cycleStop: () => post<{ ok: boolean }>('/api/cycle/stop', {}),
+	cycleStatus: () => get<{ stopPending: boolean }>('/api/cycle/status'),
+	inboxMessage: (member: string, filename: string) =>
+		get<InboxMessage>(`/api/members/${encodeURIComponent(member)}/inbox/${encodeURIComponent(filename)}`),
 };

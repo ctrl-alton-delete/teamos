@@ -203,7 +203,7 @@
 								<div class="message-body">
 									<pre class="msg-text">{msg.body}</pre>
 									<div class="msg-actions">
-										<a class="action-btn reply" href="#/compose?to={msg.from}&re={msg.filename}">Reply</a>
+										<a class="action-btn reply" href="#/compose?to={msg.from}&re={msg.filename}&inbox={name}">Reply</a>
 										<button class="action-btn archive" onclick={() => archiveMessage(msg.filename)}>Archive</button>
 										<button class="action-btn delete" onclick={() => deleteMessage(msg.filename)}>Delete</button>
 									</div>

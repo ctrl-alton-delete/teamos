@@ -9,23 +9,34 @@
 	let tickets: TicketCounts | null = $state(null);
 	let sibling: SiblingInfo | null = $state(null);
 	let loading = $state(true);
+	let stopPending = $state(false);
+	let stoppingCycle = $state(false);
 
 	async function load() {
 		loading = true;
-		const [m, memosData, t, s] = await Promise.all([
+		const [m, memosData, t, s, cs] = await Promise.all([
 			api.members(),
 			api.memos(),
 			api.tickets(),
 			api.sibling().catch(() => null),
+			api.cycleStatus().catch(() => ({ stopPending: false })),
 		]);
 		members = m;
 		memos = memosData.items ?? [];
 		tickets = t;
 		sibling = s;
+		stopPending = cs.stopPending;
 		loading = false;
 	}
 
 	$effect(() => { load(); });
+
+	async function cycleStop() {
+		stoppingCycle = true;
+		await api.cycleStop();
+		stopPending = true;
+		stoppingCycle = false;
+	}
 
 	async function archiveMemo(index: number) {
 		await api.archiveMemo(index);
@@ -39,7 +50,16 @@
 	<div class="loading">Loading...</div>
 {:else}
 	<section class="section">
-		<h2 class="section-title">Team</h2>
+		<div class="section-header">
+			<h2 class="section-title">Team</h2>
+			{#if stopPending}
+				<span class="stop-status">Stop pending...</span>
+			{:else}
+				<button class="stop-btn" onclick={cycleStop} disabled={stoppingCycle}>
+					{stoppingCycle ? 'Stopping...' : 'Stop Cycle'}
+				</button>
+			{/if}
+		</div>
 		<div class="member-grid">
 			{#each members as member}
 				<MemberCard {member} />
@@ -91,6 +111,36 @@
 		color: var(--text-muted);
 	}
 	.section { margin-bottom: 2rem; }
+	.section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 0.75rem;
+	}
+	.section-header .section-title { margin-bottom: 0; }
+	.stop-btn {
+		padding: 0.375rem 0.75rem;
+		border: 1px solid var(--danger);
+		border-radius: var(--radius);
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: var(--danger);
+		background: transparent;
+		transition: all var(--transition);
+	}
+	.stop-btn:hover:not(:disabled) {
+		background: var(--danger);
+		color: var(--on-primary);
+	}
+	.stop-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+	.stop-status {
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: var(--warning);
+		padding: 0.375rem 0.75rem;
+		border: 1px solid var(--warning);
+		border-radius: var(--radius);
+	}
 	.section-title {
 		font-size: 0.8rem;
 		font-weight: 600;
