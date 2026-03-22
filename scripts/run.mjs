@@ -33,6 +33,8 @@
  *   --no-commit          Skip automatic git commit after each cycle
  *   --no-clerk           Skip clerk agent after each pass
  *   --clerk-only         Run only the clerk agent, then exit
+ *   --budget <pri:n>     Max member cycles at a priority per pass (repeatable)
+ *                                                (defaults: thisWeek:2, later:1)
  *   --dry-run            List members with work, don't invoke agent
  *   --help               Show this help
  */
@@ -73,6 +75,11 @@ const STARVATION_THRESHOLDS_MS = {
 	today:    24 * 60 * 60 * 1000,   // ~24h
 	thisWeek: 96 * 60 * 60 * 1000,   // ~4 days
 	later:    168 * 60 * 60 * 1000,  // ~1 week
+};
+
+const DEFAULT_CYCLE_BUDGETS = {
+	thisWeek: 2,
+	later:    1,
 };
 
 // ─── Stream formatters ─────────────────────────────────────────────────────────
@@ -266,7 +273,7 @@ async function idleWait(ms, teamDir, members) {
 	const end = Date.now() + ms;
 	while (Date.now() < end) {
 		if (await checkStop(teamDir)) return 'stop';
-		if ((await getMembersWithWork(members, 'later', teamDir)).length > 0) return 'work';
+		if ((await getMembersWithWork(members, 'today', teamDir)).length > 0) return 'work';
 		const remaining = end - Date.now();
 		const delay = Math.min(IDLE_POLL_MS, remaining);
 		if (delay > 0) await new Promise(r => setTimeout(r, delay));
@@ -284,21 +291,30 @@ async function loadSchedulerState(logsDir) {
 			const ts = state.lastServedAt?.[p];
 			lastServedAt[p] = (typeof ts === 'number' && ts > 0 && ts <= now) ? ts : now;
 		}
+		const lastServedMember = state.lastServedMember ?? {};
 		console.log('[runner] Restored scheduler state from previous run.');
-		return lastServedAt;
+		return { lastServedAt, lastServedMember };
 	} catch {
 		const lastServedAt = {};
 		for (const p of PRIORITY_ORDER) lastServedAt[p] = Date.now();
-		return lastServedAt;
+		return { lastServedAt, lastServedMember: {} };
 	}
 }
 
-async function saveSchedulerState(logsDir, lastServedAt) {
-	const state = { lastServedAt, updatedAt: new Date().toISOString() };
+async function saveSchedulerState(logsDir, { lastServedAt, lastServedMember }) {
+	const state = { lastServedAt, lastServedMember, updatedAt: new Date().toISOString() };
 	await writeFile(
 		join(logsDir, 'scheduler-state.json'),
 		JSON.stringify(state, null, '\t') + '\n', 'utf-8',
 	).catch(() => {});
+}
+
+/** Rotate membersWithWork so the member after lastServed is first (round-robin fairness). */
+function rotateAfter(membersWithWork, lastServedName) {
+	if (!lastServedName || membersWithWork.length <= 1) return membersWithWork;
+	const idx = membersWithWork.findIndex(m => m.name === lastServedName);
+	if (idx < 0) return membersWithWork;
+	return [...membersWithWork.slice(idx + 1), ...membersWithWork.slice(0, idx + 1)];
 }
 
 // ─── Member discovery ──────────────────────────────────────────────────────────
@@ -391,12 +407,10 @@ async function readInboxMessages(memberDir) {
 async function buildCyclePrompt(member, priority, teamDir) {
 	const memberDir = join(teamDir, 'members', member.name);
 	const rulesFile = join(TEAMOS_ROOT, 'agent-rules', 'cycle.md');
-	const systemFile = join(TEAMOS_ROOT, 'README.md');
 
-	const [rules, systemDoc, orgDoc, memosDoc, projectsDoc, membersDoc,
+	const [rules, orgDoc, memosDoc, projectsDoc, membersDoc,
 		profile, state, todos, schedule] = await Promise.all([
 		readTextOrEmpty(rulesFile),
-		readTextOrEmpty(systemFile),
 		readTextOrEmpty(join(teamDir, 'org.md')),
 		readTextOrEmpty(join(teamDir, 'memos.json')),
 		readTextOrEmpty(join(teamDir, 'projects.json')),
@@ -415,10 +429,6 @@ async function buildCyclePrompt(member, priority, teamDir) {
 		`# Time: ${formatTimestamp()}`,
 		`# Team directory: team/`,
 		`# Member directory: team/members/${member.name}/`,
-		'',
-		'## System Architecture',
-		'',
-		systemDoc,
 		'',
 		'## Organization',
 		'',
@@ -678,6 +688,8 @@ function printHelp() {
 		'  --no-commit          Skip automatic git commit after each cycle',
 		'  --no-clerk           Skip clerk agent after each pass',
 		'  --clerk-only         Run only the clerk agent, then exit',
+		'  --budget <pri:n>     Max member cycles at a priority per pass (repeatable)',
+		'                         (defaults: thisWeek:2, later:1)',
 		'  --dry-run            List members with work, don\'t invoke agent',
 		'  --help               Show this help',
 	];
@@ -697,6 +709,7 @@ function parseArgs(argv) {
 		noClerk: false,
 		clerkOnly: false,
 		dryRun: false,
+		budgets: { ...DEFAULT_CYCLE_BUDGETS },
 	};
 
 	for (let i = 0; i < argv.length; i++) {
@@ -733,6 +746,19 @@ function parseArgs(argv) {
 			case '--clerk-only':
 				opts.clerkOnly = true;
 				break;
+			case '--budget': {
+				const spec = argv[++i]; // e.g. "later:2" or "thisWeek:3"
+				if (spec) {
+					const [pri, count] = spec.split(':');
+					if (PRIORITY_ORDER.includes(pri) && !isNaN(parseInt(count, 10))) {
+						opts.budgets[pri] = parseInt(count, 10);
+					} else {
+						console.error(`Invalid --budget spec: "${spec}". Use priority:count (e.g. later:2)`);
+						process.exit(1);
+					}
+				}
+				break;
+			}
 			case '--dry-run':
 				opts.dryRun = true;
 				break;
@@ -842,11 +868,19 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 
 // ─── Pass execution ────────────────────────────────────────────────────────────
 
-async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, lastServedAt, useTimeout }) {
+async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, schedulerState, useTimeout }) {
+	const { lastServedAt, lastServedMember } = schedulerState;
 	const startTime = Date.now();
 	let currentPriority = opts.priority;
 	let cycleCount = 0;
 	let totalMemberRuns = 0;
+	const budgetSpent = {};
+
+	function isBudgetExhausted(priority) {
+		const cap = opts.budgets[priority];
+		if (cap == null) return false;
+		return (budgetSpent[priority] ?? 0) >= cap;
+	}
 
 	while (cycleCount < opts.maxCycles) {
 		if (useTimeout && (Date.now() - startTime) >= MAX_RUN_MS) {
@@ -858,6 +892,7 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, las
 		}
 
 		// Starvation check: force a cycle at a neglected priority before it drifts too far
+		// Starvation overrides budgets — that's the whole point of the safety net
 		const starved = getStarvedPriority(lastServedAt, currentPriority);
 		if (starved) {
 			const starvedMembers = await getMembersWithWork(members, starved, teamDir);
@@ -883,7 +918,18 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, las
 		}
 
 		const priorityIdx = PRIORITY_ORDER.indexOf(currentPriority);
-		const membersWithWork = await getMembersWithWork(members, currentPriority, teamDir);
+
+		if (isBudgetExhausted(currentPriority)) {
+			if (priorityIdx < PRIORITY_ORDER.length - 1) {
+				console.log(`\n[runner] Budget exhausted for "${currentPriority}" (${opts.budgets[currentPriority]} cycle(s)), advancing.`);
+				currentPriority = PRIORITY_ORDER[priorityIdx + 1];
+				continue;
+			}
+			console.log(`\n[runner] Budget exhausted for "${currentPriority}" — all priorities done.`);
+			break;
+		}
+
+		let membersWithWork = await getMembersWithWork(members, currentPriority, teamDir);
 
 		if (membersWithWork.length === 0) {
 			if (priorityIdx < PRIORITY_ORDER.length - 1) {
@@ -896,6 +942,16 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, las
 			break;
 		}
 
+		// Rotate for round-robin fairness, then trim to remaining budget
+		const cap = opts.budgets[currentPriority];
+		if (cap != null) {
+			membersWithWork = rotateAfter(membersWithWork, lastServedMember[currentPriority]);
+			const remaining = cap - (budgetSpent[currentPriority] ?? 0);
+			if (membersWithWork.length > remaining) {
+				membersWithWork = membersWithWork.slice(0, remaining);
+			}
+		}
+
 		cycleCount++;
 		console.log(`\n[runner] Cycle ${cycleCount}, priority: ${currentPriority}, ` +
 			`members: ${membersWithWork.map(m => m.name).join(', ')}`);
@@ -905,6 +961,10 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, las
 			opts, teamDir, logsDir, version, repoRoot, startTime, useTimeout,
 		});
 		totalMemberRuns += result.memberRuns;
+		budgetSpent[currentPriority] = (budgetSpent[currentPriority] ?? 0) + result.memberRuns;
+		if (membersWithWork.length > 0) {
+			lastServedMember[currentPriority] = membersWithWork[membersWithWork.length - 1].name;
+		}
 		lastServedAt[currentPriority] = Date.now();
 
 		if (result.stopped) return { cycleCount, totalMemberRuns, stopped: true, timedOut: false };
@@ -995,18 +1055,22 @@ async function main() {
 
 	// ── Run ────────────────────────────────────────────────────────────────────
 
+	const budgetStr = Object.entries(opts.budgets)
+		.map(([p, n]) => `${p}:${n}`)
+		.join(', ');
 	const banner = [
 		'═'.repeat(72),
 		`  teamos (${version})${opts.loop ? ' [loop mode]' : ''}`,
 		`  ${members.length} active AI member(s): ${members.map(m => m.name).join(', ')}`,
 		`  Starting priority: ${opts.priority}`,
+		budgetStr ? `  Budgets: ${budgetStr}` : null,
 		opts.loop ? `  Interval: ${opts.intervalMs / 60000}min` : null,
 		'═'.repeat(72),
 	].filter(Boolean).join('\n');
 	console.log(banner);
 
 	const logsDir = await ensureLogsDir(teamDir);
-	const lastServedAt = await loadSchedulerState(logsDir);
+	const schedulerState = await loadSchedulerState(logsDir);
 
 	if (opts.loop) {
 		let passNum = 0;
@@ -1024,12 +1088,12 @@ async function main() {
 			console.log('═'.repeat(72));
 
 			const result = await runPass({
-				opts, teamDir, logsDir, version, repoRoot, members, lastServedAt,
+				opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
 				useTimeout: false,
 			});
 
 			console.log(`\n[runner] Pass ${passNum} complete — ${result.cycleCount} cycle(s), ${result.totalMemberRuns} member run(s).`);
-			await saveSchedulerState(logsDir, lastServedAt);
+			await saveSchedulerState(logsDir, schedulerState);
 
 			if (result.stopped) {
 				console.log('[runner] Stop file detected — exiting loop.');
@@ -1058,10 +1122,10 @@ async function main() {
 		console.log('\nTeamOS loop ended.');
 	} else {
 		const result = await runPass({
-			opts, teamDir, logsDir, version, repoRoot, members, lastServedAt,
+			opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
 			useTimeout: true,
 		});
-		await saveSchedulerState(logsDir, lastServedAt);
+		await saveSchedulerState(logsDir, schedulerState);
 
 		if (result.cycleCount >= opts.maxCycles) {
 			console.log(`\n[runner] Reached max cycles (${opts.maxCycles}).`);

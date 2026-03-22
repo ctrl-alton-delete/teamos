@@ -154,6 +154,7 @@ node teamos/scripts/run.mjs --loop --no-commit
 | `--no-commit` | — | Skip automatic git commit after each cycle |
 | `--no-clerk` | — | Skip clerk agent after each pass |
 | `--clerk-only` | — | Run only the clerk agent, then exit |
+| `--budget <pri:n>` | `thisWeek:2, later:1` | Max member cycles at a priority per pass (repeatable) |
 | `--dry-run` | — | List members with work, don't invoke agent |
 
 ### Loop Mode (Built-in Scheduler)
@@ -174,9 +175,22 @@ node teamos/scripts/run.mjs --loop --agent cursor
 In loop mode the runner:
 
 1. Runs a full priority cascade pass (no hard time limit)
-2. If the pass completes before the interval elapses, **idles** — polling every 30 seconds for new work (inbox messages, due schedule events) or a `.stop` file
-3. If new work arrives during idle, starts the next pass early
+2. If the pass completes before the interval elapses, **idles** — polling every 30 seconds for new work or a `.stop` file
+3. If new work arrives during idle at **pressing** or **today** priority, starts the next pass early. Lower-priority work (thisWeek, later) waits for the interval timer.
 4. If the pass overruns the interval, starts the next pass immediately
+
+**Cycle budgets** — Lower-priority work is nibbled at rather than fully processed each pass. Per-pass limits prevent the runner from being perpetually busy with non-urgent work:
+
+| Priority | Default budget | Effect |
+|---|---|---|
+| `pressing` | unlimited | Always fully processed |
+| `today` | unlimited | Always fully processed |
+| `thisWeek` | 2 member cycles | At most 2 members run per pass |
+| `later` | 1 member cycle | At most 1 member runs per pass |
+
+Override with `--budget <priority>:<count>` (repeatable). Starvation cycles bypass budgets.
+
+**Member ordering** — At unbounded priorities (pressing, today), members run in `members.json` order every pass. Place operationally critical roles (e.g. DevOps) earlier in the manifest so their urgent work is always handled first. At budgeted priorities (thisWeek, later), members are served in **round-robin** order so that no single member monopolizes the limited slots. The rotation state is persisted in `scheduler-state.json` across restarts.
 
 **Starvation prevention** — If high-priority work dominates every pass, lower priorities get periodic forced cycles so they don't drift indefinitely:
 
@@ -212,7 +226,7 @@ pressing  →  today  →  thisWeek  →  later
 - **ThisWeek** — Handle this week
 - **Later** — Nibble at when there is time
 
-The runner starts at the highest priority and cascades down. It only advances to the next level when no members have work at the current level.
+The runner starts at the highest priority and cascades down. It only advances to the next level when no members have work at the current level. Within a priority level, member order follows `members.json` — so list members in descending operational importance.
 
 ## Work Detection
 
