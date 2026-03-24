@@ -35,6 +35,8 @@
  *   --clerk-only         Run only the clerk agent, then exit
  *   --budget <pri:n>     Max member cycles at a priority per pass (repeatable)
  *                                                (defaults: thisWeek:2, later:1)
+ *   --min-interval <p:d> Min days between serving a priority (repeatable)
+ *                                                (defaults: thisWeek:5, later:7)
  *   --dry-run            List members with work, don't invoke agent
  *   --help               Show this help
  */
@@ -72,10 +74,19 @@ const IDLE_POLL_MS = 30 * 1000;                   // poll interval during idle w
 
 const STARVATION_THRESHOLDS_MS = {
 	pressing: 0,
-	today:    24 * 60 * 60 * 1000,   // ~24h
-	thisWeek: 96 * 60 * 60 * 1000,   // ~4 days
-	later:    168 * 60 * 60 * 1000,  // ~1 week
+	today:    24 * 60 * 60 * 1000,          // ~24h
+	thisWeek: 7 * 24 * 60 * 60 * 1000,      // 7 days  (must be > MIN_INTERVAL)
+	later:    14 * 24 * 60 * 60 * 1000,      // 14 days (must be > MIN_INTERVAL)
 };
+
+/** Minimum time between serving a priority level (work-week cadence for lower priorities). */
+const MIN_INTERVAL_MS = {
+	thisWeek: 5 * 24 * 60 * 60 * 1000,      // 5 days (work-week)
+	later:    7 * 24 * 60 * 60 * 1000,       // 1 week
+};
+
+const CLERK_DAILY_MS = 24 * 60 * 60 * 1000;                // run clerk at most once per day
+const EFFICIENCY_ANALYSIS_MS = 7 * 24 * 60 * 60 * 1000;    // weekly efficiency analysis
 
 const DEFAULT_CYCLE_BUDGETS = {
 	thisWeek: 2,
@@ -292,20 +303,29 @@ async function loadSchedulerState(logsDir) {
 			lastServedAt[p] = (typeof ts === 'number' && ts > 0 && ts <= now) ? ts : now;
 		}
 		const lastServedMember = state.lastServedMember ?? {};
+		const validTs = (v) => typeof v === 'number' && v > 0 && v <= now ? v : 0;
+		const lastClerkAt = validTs(state.lastClerkAt);
+		const lastEfficiencyAt = validTs(state.lastEfficiencyAt);
 		console.log('[runner] Restored scheduler state from previous run.');
-		return { lastServedAt, lastServedMember };
+		return { lastServedAt, lastServedMember, lastClerkAt, lastEfficiencyAt };
 	} catch {
 		const lastServedAt = {};
 		for (const p of PRIORITY_ORDER) lastServedAt[p] = Date.now();
-		return { lastServedAt, lastServedMember: {} };
+		return { lastServedAt, lastServedMember: {}, lastClerkAt: 0, lastEfficiencyAt: 0 };
 	}
 }
 
-async function saveSchedulerState(logsDir, { lastServedAt, lastServedMember }) {
-	const state = { lastServedAt, lastServedMember, updatedAt: new Date().toISOString() };
+async function saveSchedulerState(logsDir, state) {
+	const out = {
+		lastServedAt: state.lastServedAt,
+		lastServedMember: state.lastServedMember,
+		lastClerkAt: state.lastClerkAt,
+		lastEfficiencyAt: state.lastEfficiencyAt,
+		updatedAt: new Date().toISOString(),
+	};
 	await writeFile(
 		join(logsDir, 'scheduler-state.json'),
-		JSON.stringify(state, null, '\t') + '\n', 'utf-8',
+		JSON.stringify(out, null, '\t') + '\n', 'utf-8',
 	).catch(() => {});
 }
 
@@ -315,6 +335,306 @@ function rotateAfter(membersWithWork, lastServedName) {
 	const idx = membersWithWork.findIndex(m => m.name === lastServedName);
 	if (idx < 0) return membersWithWork;
 	return [...membersWithWork.slice(idx + 1), ...membersWithWork.slice(0, idx + 1)];
+}
+
+// ─── Automated housekeeping ─────────────────────────────────────────────────────
+// Lightweight JS checks that replace the per-cycle clerk for routine tasks.
+
+function slugify(text) {
+	return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+}
+
+/**
+ * Run automated housekeeping: archive expired memos, prune stale schedule events,
+ * validate JSON files.  Returns { fixed: string[], errors: string[] }.
+ */
+async function runHousekeeping(teamDir, members) {
+	const fixed = [];
+	const errors = [];
+
+	// 1. Archive expired memos
+	const memosPath = join(teamDir, 'memos.json');
+	try {
+		const raw = await readFile(memosPath, 'utf-8');
+		const memos = JSON.parse(raw);
+		const now = new Date();
+		const expired = (memos.items ?? []).filter(m => m.expiresAt && new Date(m.expiresAt) < now);
+		if (expired.length > 0) {
+			const archiveDir = join(teamDir, 'archives');
+			await mkdir(archiveDir, { recursive: true });
+			for (const memo of expired) {
+				const archivePath = join(archiveDir, `memo-${slugify(memo.title)}.json`);
+				await writeFile(archivePath, JSON.stringify(memo, null, '\t') + '\n', 'utf-8');
+			}
+			memos.items = memos.items.filter(m => !expired.includes(m));
+			await writeFile(memosPath, JSON.stringify(memos, null, '\t') + '\n', 'utf-8');
+			fixed.push(`Archived ${expired.length} expired memo(s)`);
+		}
+	} catch (e) {
+		errors.push(`memos.json: ${e.message}`);
+	}
+
+	// 2. Prune schedule events older than 1 week (non-recurring only)
+	const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+	for (const member of members) {
+		const schedulePath = join(teamDir, 'members', member.name, 'schedule.json');
+		try {
+			const raw = await readFile(schedulePath, 'utf-8');
+			const schedule = JSON.parse(raw);
+			const stale = (schedule.events ?? []).filter(e => !e.recurring && new Date(e.time) < weekAgo);
+			if (stale.length > 0) {
+				schedule.events = schedule.events.filter(e => !stale.includes(e));
+				await writeFile(schedulePath, JSON.stringify(schedule, null, '\t') + '\n', 'utf-8');
+				fixed.push(`Pruned ${stale.length} stale event(s) from ${member.name}'s schedule`);
+			}
+		} catch { /* missing file is fine */ }
+	}
+
+	// 3. Archive completed/cancelled projects
+	const projectsPath = join(teamDir, 'projects.json');
+	try {
+		const raw = await readFile(projectsPath, 'utf-8');
+		const manifest = JSON.parse(raw);
+		const done = (manifest.projects ?? []).filter(p => p.status === 'completed' || p.status === 'cancelled');
+		if (done.length > 0) {
+			const archiveDir = join(teamDir, 'archives');
+			await mkdir(archiveDir, { recursive: true });
+			for (const proj of done) {
+				const archivePath = join(archiveDir, `project-${slugify(proj.code)}.json`);
+				await writeFile(archivePath, JSON.stringify(proj, null, '\t') + '\n', 'utf-8');
+			}
+			manifest.projects = manifest.projects.filter(p => !done.includes(p));
+			await writeFile(projectsPath, JSON.stringify(manifest, null, '\t') + '\n', 'utf-8');
+			fixed.push(`Archived ${done.length} completed/cancelled project(s)`);
+		}
+	} catch (e) {
+		errors.push(`projects.json: ${e.message}`);
+	}
+
+	// 4. Validate key JSON files
+	for (const member of members) {
+		for (const file of ['todo.json', 'schedule.json']) {
+			const filePath = join(teamDir, 'members', member.name, file);
+			try {
+				const raw = await readFile(filePath, 'utf-8');
+				JSON.parse(raw);
+			} catch (e) {
+				if (e.code !== 'ENOENT') errors.push(`${member.name}/${file}: ${e.message}`);
+			}
+		}
+	}
+
+	return { fixed, errors };
+}
+
+// ─── Log scanning (for efficiency analysis) ─────────────────────────────────────
+
+/**
+ * Scan recent log files and return per-member summary stats.
+ * Used to build the efficiency analysis prompt without the agent reading every log.
+ */
+async function scanRecentLogs(logsDir, days = 7) {
+	const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+	let files;
+	try { files = await readdir(logsDir); } catch { return []; }
+
+	const entries = [];
+	for (const file of files) {
+		if (!file.endsWith('.log')) continue;
+		const match = file.match(/^(.+?)\.(.+?)\.(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d+)Z\.log$/);
+		if (!match) continue;
+		const [, member, priority, datePart, hh, mm, ss] = match;
+		const ts = new Date(`${datePart}:${hh}:${mm}:${ss.slice(0, 2)}Z`);
+		if (ts.getTime() < cutoff) continue;
+
+		// Read tail to extract cost/duration without loading full file
+		const content = await readTextOrEmpty(join(logsDir, file));
+		const tail = content.slice(-600);
+		const costMatch = tail.match(/cost \$([0-9.]+)/);
+		const durMatch = tail.match(/\| ([0-9.]+)s/);
+		const rateLimited = content.includes('"status":"rejected"');
+
+		entries.push({
+			file, member, priority,
+			timestamp: ts.toISOString(),
+			cost: costMatch ? parseFloat(costMatch[1]) : 0,
+			durationSec: durMatch ? parseFloat(durMatch[1]) : 0,
+			rateLimited,
+			sizeKB: Math.round(content.length / 1024),
+		});
+	}
+
+	return entries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
+/**
+ * Build a per-member summary table from log entries.
+ */
+function buildLogSummary(entries) {
+	const byMember = {};
+	for (const e of entries) {
+		if (e.member === 'clerk') continue;
+		const key = e.member;
+		if (!byMember[key]) byMember[key] = { runs: 0, totalCost: 0, rateLimited: 0, byPriority: {} };
+		const m = byMember[key];
+		m.runs++;
+		m.totalCost += e.cost;
+		if (e.rateLimited) m.rateLimited++;
+		if (!m.byPriority[e.priority]) m.byPriority[e.priority] = { runs: 0, cost: 0 };
+		m.byPriority[e.priority].runs++;
+		m.byPriority[e.priority].cost += e.cost;
+	}
+
+	const lines = ['| Member | Runs | Cost | Rate-limited | By priority |',
+		'|--------|------|------|-------------|-------------|'];
+	for (const [name, m] of Object.entries(byMember).sort((a, b) => b[1].totalCost - a[1].totalCost)) {
+		const priStr = Object.entries(m.byPriority)
+			.map(([p, d]) => `${p}:${d.runs}/$${d.cost.toFixed(2)}`)
+			.join(', ');
+		lines.push(`| ${name} | ${m.runs} | $${m.totalCost.toFixed(2)} | ${m.rateLimited} | ${priStr} |`);
+	}
+	return lines.join('\n');
+}
+
+// ─── Post-pass maintenance ──────────────────────────────────────────────────────
+
+async function buildEfficiencyPrompt(teamDir, logsDir, members) {
+	const rulesFile = join(TEAMOS_ROOT, 'agent-rules', 'clerk-efficiency.md');
+	const rules = await readTextOrEmpty(rulesFile);
+	const membersDoc = await readTextOrEmpty(join(teamDir, 'members.json'));
+
+	const entries = await scanRecentLogs(logsDir, 7);
+	const summaryTable = buildLogSummary(entries);
+
+	// List the 30 most expensive non-rate-limited logs for the agent to investigate
+	const interesting = entries
+		.filter(e => !e.rateLimited && e.member !== 'clerk')
+		.sort((a, b) => b.cost - a.cost)
+		.slice(0, 30);
+	const logList = interesting.map(e =>
+		`  ${e.file}  ($${e.cost.toFixed(2)}, ${e.durationSec.toFixed(0)}s, ${e.sizeKB}KB)`
+	).join('\n');
+
+	return [
+		'# TeamOS Weekly Efficiency Analysis',
+		`# Time: ${formatTimestamp()}`,
+		`# Team directory: team/`,
+		`# Logs directory: team/.logs/`,
+		'',
+		'## Team Members',
+		'',
+		membersDoc,
+		'',
+		'## Last 7 Days — Summary',
+		'',
+		summaryTable,
+		'',
+		'## Most Expensive Runs (non-rate-limited)',
+		'',
+		logList || '(none)',
+		'',
+		'## Rules',
+		'',
+		rules,
+		'',
+		'## Instructions',
+		'',
+		'Analyze the logs listed above for repeated inefficiency patterns.',
+		'Read the actual log files (in team/.logs/) to understand what the agent did.',
+		'Send inbox messages ONLY for repeated patterns — not one-time fumbles.',
+		'Do NOT commit — the runner handles commits after you complete.',
+	].join('\n');
+}
+
+/**
+ * Post-pass maintenance: automated housekeeping, conditional clerk, weekly efficiency analysis.
+ * Replaces the per-cycle clerk invocation.
+ */
+async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, members, schedulerState, passErrors }) {
+	const now = Date.now();
+
+	// 1. Automated housekeeping (lightweight JS — no agent)
+	const issues = await runHousekeeping(teamDir, members);
+	if (issues.fixed.length > 0) {
+		console.log(`[runner] Housekeeping: ${issues.fixed.join('; ')}`);
+		if (!opts.noCommit) {
+			if (commitChanges('housekeeping: automated cleanup', repoRoot)) {
+				console.log('  Housekeeping committed.');
+				if (opts.push) pushChanges(repoRoot);
+			}
+		}
+	}
+	if (issues.errors.length > 0) {
+		console.log(`[runner] Housekeeping issues: ${issues.errors.join('; ')}`);
+	}
+
+	// 2. Clerk: run if issues need agent intervention, errors occurred, or ≥24h since last run
+	const errorContext = [...(passErrors ?? []), ...issues.errors];
+	const timeSinceClerk = now - (schedulerState.lastClerkAt ?? 0);
+	const needsClerk = errorContext.length > 0 || timeSinceClerk >= CLERK_DAILY_MS;
+
+	if (needsClerk && !opts.noClerk) {
+		console.log('\n[runner] Running daily clerk...');
+		const clerkLog = buildLogPath(logsDir, 'clerk', 'maintenance');
+
+		await writeFile(clerkLog, [
+			`Clerk run (maintenance)`,
+			`Agent: ${opts.agent}`,
+			`TeamOS: ${version}`,
+			`Started: ${new Date().toISOString()}`,
+			errorContext.length > 0 ? `Issues: ${errorContext.join('; ')}` : 'No issues.',
+			'═'.repeat(72),
+			'',
+		].join('\n'));
+
+		const clerkPrompt = await buildClerkPrompt(teamDir, errorContext.length > 0 ? errorContext.join('\n') : null);
+		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog);
+
+		if (clerkExit !== 0) {
+			console.error(`[runner] Clerk exited with code ${clerkExit}`);
+		}
+
+		if (!opts.noCommit) {
+			if (commitChanges('clerk: maintenance', repoRoot)) {
+				console.log('  Clerk committed.');
+				if (opts.push) pushChanges(repoRoot);
+			}
+		}
+
+		schedulerState.lastClerkAt = Date.now();
+	}
+
+	// 3. Weekly efficiency analysis
+	const timeSinceAnalysis = now - (schedulerState.lastEfficiencyAt ?? 0);
+	if (!opts.noClerk && timeSinceAnalysis >= EFFICIENCY_ANALYSIS_MS) {
+		console.log('\n[runner] Running weekly efficiency analysis...');
+		const analysisLog = buildLogPath(logsDir, 'clerk', 'efficiency');
+
+		await writeFile(analysisLog, [
+			`Clerk run (weekly efficiency analysis)`,
+			`Agent: ${opts.agent}`,
+			`TeamOS: ${version}`,
+			`Started: ${new Date().toISOString()}`,
+			'═'.repeat(72),
+			'',
+		].join('\n'));
+
+		const prompt = await buildEfficiencyPrompt(teamDir, logsDir, members);
+		const analysisExit = await runAgent(opts.agent, prompt, repoRoot, analysisLog);
+
+		if (analysisExit !== 0) {
+			console.error(`[runner] Efficiency analysis exited with code ${analysisExit}`);
+		}
+
+		if (!opts.noCommit) {
+			if (commitChanges('clerk: weekly efficiency analysis', repoRoot)) {
+				console.log('  Analysis committed.');
+				if (opts.push) pushChanges(repoRoot);
+			}
+		}
+
+		schedulerState.lastEfficiencyAt = Date.now();
+	}
 }
 
 // ─── Member discovery ──────────────────────────────────────────────────────────
@@ -690,6 +1010,8 @@ function printHelp() {
 		'  --clerk-only         Run only the clerk agent, then exit',
 		'  --budget <pri:n>     Max member cycles at a priority per pass (repeatable)',
 		'                         (defaults: thisWeek:2, later:1)',
+		'  --min-interval <p:d> Min days between serving a priority (repeatable)',
+		'                         (defaults: thisWeek:5, later:7)',
 		'  --dry-run            List members with work, don\'t invoke agent',
 		'  --help               Show this help',
 	];
@@ -710,6 +1032,7 @@ function parseArgs(argv) {
 		clerkOnly: false,
 		dryRun: false,
 		budgets: { ...DEFAULT_CYCLE_BUDGETS },
+		minIntervals: { ...MIN_INTERVAL_MS },
 	};
 
 	for (let i = 0; i < argv.length; i++) {
@@ -754,6 +1077,19 @@ function parseArgs(argv) {
 						opts.budgets[pri] = parseInt(count, 10);
 					} else {
 						console.error(`Invalid --budget spec: "${spec}". Use priority:count (e.g. later:2)`);
+						process.exit(1);
+					}
+				}
+				break;
+			}
+			case '--min-interval': {
+				const spec = argv[++i]; // e.g. "thisWeek:5" (days)
+				if (spec) {
+					const [pri, days] = spec.split(':');
+					if (PRIORITY_ORDER.includes(pri) && !isNaN(parseFloat(days))) {
+						opts.minIntervals[pri] = parseFloat(days) * 24 * 60 * 60 * 1000;
+					} else {
+						console.error(`Invalid --min-interval spec: "${spec}". Use priority:days (e.g. thisWeek:5)`);
 						process.exit(1);
 					}
 				}
@@ -833,37 +1169,7 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 		}
 	}
 
-	if (!stopped && !opts.noClerk) {
-		console.log('\n[runner] Running clerk...');
-		const clerkLog = buildLogPath(logsDir, 'clerk', priority);
-
-		await writeFile(clerkLog, [
-			`Clerk run after cycle ${cycleCount}`,
-			`Priority: ${priority}`,
-			`Agent: ${opts.agent}`,
-			`TeamOS: ${version}`,
-			`Started: ${new Date().toISOString()}`,
-			lastError ? `Error: ${lastError}` : 'No errors.',
-			'═'.repeat(72),
-			'',
-		].join('\n'));
-
-		const clerkPrompt = await buildClerkPrompt(teamDir, lastError);
-		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog);
-
-		if (clerkExit !== 0) {
-			console.error(`[runner] Clerk exited with code ${clerkExit}`);
-		}
-
-		if (!opts.noCommit) {
-			if (commitChanges(`clerk: cycle ${cycleCount} (${priority})`, repoRoot)) {
-				console.log('  Clerk committed.');
-				if (opts.push) pushChanges(repoRoot);
-			}
-		}
-	}
-
-	return { memberRuns, stopped };
+	return { memberRuns, stopped, lastError };
 }
 
 // ─── Pass execution ────────────────────────────────────────────────────────────
@@ -875,6 +1181,7 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, sch
 	let cycleCount = 0;
 	let totalMemberRuns = 0;
 	const budgetSpent = {};
+	const passErrors = [];
 
 	function isBudgetExhausted(priority) {
 		const cap = opts.budgets[priority];
@@ -884,11 +1191,11 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, sch
 
 	while (cycleCount < opts.maxCycles) {
 		if (useTimeout && (Date.now() - startTime) >= MAX_RUN_MS) {
-			return { cycleCount, totalMemberRuns, stopped: false, timedOut: true };
+			return { cycleCount, totalMemberRuns, stopped: false, timedOut: true, passErrors };
 		}
 
 		if (await checkStop(teamDir)) {
-			return { cycleCount, totalMemberRuns, stopped: true, timedOut: false };
+			return { cycleCount, totalMemberRuns, stopped: true, timedOut: false, passErrors };
 		}
 
 		// Starvation check: force a cycle at a neglected priority before it drifts too far
@@ -910,9 +1217,10 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, sch
 					opts, teamDir, logsDir, version, repoRoot, startTime, useTimeout,
 				});
 				totalMemberRuns += result.memberRuns;
+				if (result.lastError) passErrors.push(result.lastError);
 				lastServedAt[starved] = Date.now();
 
-				if (result.stopped) return { cycleCount, totalMemberRuns, stopped: true, timedOut: false };
+				if (result.stopped) return { cycleCount, totalMemberRuns, stopped: true, timedOut: false, passErrors };
 				continue;
 			}
 		}
@@ -927,6 +1235,22 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, sch
 			}
 			console.log(`\n[runner] Budget exhausted for "${currentPriority}" — all priorities done.`);
 			break;
+		}
+
+		// Min-interval gate: skip priorities served too recently (work-week cadence)
+		const minInterval = opts.minIntervals[currentPriority];
+		if (minInterval) {
+			const elapsed = Date.now() - (lastServedAt[currentPriority] ?? 0);
+			if (elapsed < minInterval) {
+				const remainH = Math.round((minInterval - elapsed) / 3600000);
+				if (priorityIdx < PRIORITY_ORDER.length - 1) {
+					console.log(`\n[runner] Priority "${currentPriority}" on cooldown (${remainH}h remaining), advancing.`);
+					currentPriority = PRIORITY_ORDER[priorityIdx + 1];
+					continue;
+				}
+				console.log(`\n[runner] Priority "${currentPriority}" on cooldown (${remainH}h remaining) — all priorities done.`);
+				break;
+			}
 		}
 
 		let membersWithWork = await getMembersWithWork(members, currentPriority, teamDir);
@@ -961,16 +1285,17 @@ async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, sch
 			opts, teamDir, logsDir, version, repoRoot, startTime, useTimeout,
 		});
 		totalMemberRuns += result.memberRuns;
+		if (result.lastError) passErrors.push(result.lastError);
 		budgetSpent[currentPriority] = (budgetSpent[currentPriority] ?? 0) + result.memberRuns;
 		if (membersWithWork.length > 0) {
 			lastServedMember[currentPriority] = membersWithWork[membersWithWork.length - 1].name;
 		}
 		lastServedAt[currentPriority] = Date.now();
 
-		if (result.stopped) return { cycleCount, totalMemberRuns, stopped: true, timedOut: false };
+		if (result.stopped) return { cycleCount, totalMemberRuns, stopped: true, timedOut: false, passErrors };
 	}
 
-	return { cycleCount, totalMemberRuns, stopped: false, timedOut: false };
+	return { cycleCount, totalMemberRuns, stopped: false, timedOut: false, passErrors };
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
@@ -1058,12 +1383,16 @@ async function main() {
 	const budgetStr = Object.entries(opts.budgets)
 		.map(([p, n]) => `${p}:${n}`)
 		.join(', ');
+	const intervalStr = Object.entries(opts.minIntervals)
+		.map(([p, ms]) => `${p}:${Math.round(ms / 86400000)}d`)
+		.join(', ');
 	const banner = [
 		'═'.repeat(72),
 		`  teamos (${version})${opts.loop ? ' [loop mode]' : ''}`,
 		`  ${members.length} active AI member(s): ${members.map(m => m.name).join(', ')}`,
 		`  Starting priority: ${opts.priority}`,
 		budgetStr ? `  Budgets: ${budgetStr}` : null,
+		intervalStr ? `  Min intervals: ${intervalStr}` : null,
 		opts.loop ? `  Interval: ${opts.intervalMs / 60000}min` : null,
 		'═'.repeat(72),
 	].filter(Boolean).join('\n');
@@ -1092,6 +1421,14 @@ async function main() {
 				useTimeout: false,
 			});
 
+
+			// Post-pass maintenance: housekeeping, conditional clerk, weekly efficiency analysis
+			if (!result.stopped) {
+				await runMaintenance({
+					opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
+					passErrors: result.passErrors,
+				});
+			}
 			console.log(`\n[runner] Pass ${passNum} complete — ${result.cycleCount} cycle(s), ${result.totalMemberRuns} member run(s).`);
 			await saveSchedulerState(logsDir, schedulerState);
 
@@ -1125,6 +1462,12 @@ async function main() {
 			opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
 			useTimeout: true,
 		});
+
+		await runMaintenance({
+			opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
+			passErrors: result.passErrors,
+		});
+
 		await saveSchedulerState(logsDir, schedulerState);
 
 		if (result.cycleCount >= opts.maxCycles) {
