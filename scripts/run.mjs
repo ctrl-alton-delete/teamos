@@ -649,6 +649,48 @@ async function loadMembers(teamDir) {
 
 // ─── Work detection ────────────────────────────────────────────────────────────
 
+/**
+ * Determine if a schedule event is currently due.
+ * Non-recurring: due if time <= now.
+ * Recurring: due if the event's `time` field is <= now.  After the agent
+ * handles a recurring event, the runner advances `time` to the next
+ * occurrence so it won't re-trigger until then.
+ */
+function isEventDue(event, now) {
+	return new Date(event.time) <= now;
+}
+
+/**
+ * Compute the next occurrence of a recurring event after `after`.
+ * Steps forward from `base` by the recurrence interval until the result > after.
+ */
+function nextOccurrence(base, recurrence, after) {
+	const { frequency, interval = 1 } = recurrence;
+
+	if (frequency === 'daily') {
+		const ms = interval * 24 * 60 * 60 * 1000;
+		const periods = Math.ceil((after - base) / ms);
+		return new Date(base.getTime() + Math.max(1, periods) * ms);
+	}
+
+	if (frequency === 'weekly') {
+		const ms = interval * 7 * 24 * 60 * 60 * 1000;
+		const periods = Math.ceil((after - base) / ms);
+		return new Date(base.getTime() + Math.max(1, periods) * ms);
+	}
+
+	if (frequency === 'monthly') {
+		let d = new Date(base);
+		while (d <= after) {
+			d = new Date(d);
+			d.setMonth(d.getMonth() + interval);
+		}
+		return d;
+	}
+
+	return new Date(base.getTime() + interval * 24 * 60 * 60 * 1000);
+}
+
 async function memberHasWork(memberName, priority, teamDir) {
 	const memberDir = join(teamDir, 'members', memberName);
 
@@ -677,11 +719,34 @@ async function memberHasWork(memberName, priority, teamDir) {
 		try {
 			const schedule = JSON.parse(await readFile(schedulePath, 'utf-8'));
 			const now = new Date();
-			if (schedule.events.some(e => new Date(e.time) <= now)) return true;
+			if (schedule.events.some(e => isEventDue(e, now))) return true;
 		} catch { /* ignore */ }
 	}
 
 	return false;
+}
+
+/**
+ * After a member's cycle, advance any due recurring events to their next
+ * occurrence so they don't re-trigger until the next period.
+ */
+async function advanceRecurringEvents(memberName, teamDir) {
+	const schedulePath = join(teamDir, 'members', memberName, 'schedule.json');
+	try {
+		const raw = await readFile(schedulePath, 'utf-8');
+		const schedule = JSON.parse(raw);
+		const now = new Date();
+		let changed = false;
+		for (const event of (schedule.events ?? [])) {
+			if (event.recurring && event.recurrence && new Date(event.time) <= now) {
+				event.time = nextOccurrence(new Date(event.time), event.recurrence, now).toISOString();
+				changed = true;
+			}
+		}
+		if (changed) {
+			await writeFile(schedulePath, JSON.stringify(schedule, null, '\t') + '\n', 'utf-8');
+		}
+	} catch { /* missing or invalid schedule is fine */ }
 }
 
 async function getMembersWithWork(members, priority, teamDir) {
@@ -1155,6 +1220,8 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 		}
 
 		console.log(`\n  Complete: ${member.name}\n`);
+
+		await advanceRecurringEvents(member.name, teamDir);
 
 		if (membersWithWork.indexOf(member) < membersWithWork.length - 1) {
 			await new Promise(r => setTimeout(r, 500));
