@@ -441,11 +441,12 @@ async function scanRecentLogs(logsDir, days = 7) {
 	const entries = [];
 	for (const file of files) {
 		if (!file.endsWith('.log')) continue;
-		const match = file.match(/^(.+?)\.(.+?)\.(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d+)Z\.log$/);
+		const match = file.match(/^(.+?)\.(.+?)\.(\d{4}-\d{2}-\d{2}T(\d{2})-(\d{2})-(\d{2})-(\d+)Z)\.log$/);
 		if (!match) continue;
-		const [, member, priority, datePart, hh, mm, ss] = match;
-		const ts = new Date(`${datePart}:${hh}:${mm}:${ss.slice(0, 2)}Z`);
-		if (ts.getTime() < cutoff) continue;
+		const [, member, priority, , hh, mm, ss, ms] = match;
+		const tsStr = match[3].replace(/(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d+)Z/, '$1T$2:$3:$4.$5Z');
+		const ts = new Date(tsStr);
+		if (isNaN(ts.getTime()) || ts.getTime() < cutoff) continue;
 
 		// Read tail to extract cost/duration without loading full file
 		const content = await readTextOrEmpty(join(logsDir, file));
