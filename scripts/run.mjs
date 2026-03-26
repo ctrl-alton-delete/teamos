@@ -373,6 +373,65 @@ async function getMembersWithWork(members, priority, teamDir) {
 	return results;
 }
 
+// ─── Self-assessment schedule injection ─────────────────────────────────────────
+
+const SELF_ASSESSMENT_TITLE = 'Weekly Self-Assessment';
+
+/**
+ * Compute the next Friday at 18:00 UTC on or after the given date.
+ */
+function nextFriday(from = new Date()) {
+	const d = new Date(from);
+	d.setUTCHours(18, 0, 0, 0);
+	const day = d.getUTCDay(); // 0=Sun … 5=Fri
+	const daysUntilFri = (5 - day + 7) % 7 || 7; // at least 1 day ahead
+	d.setUTCDate(d.getUTCDate() + daysUntilFri);
+	return d;
+}
+
+function buildSelfAssessmentEvent(fromDate) {
+	return {
+		title: SELF_ASSESSMENT_TITLE,
+		description:
+			'Conduct a weekly self-assessment following the rules in teamos/agent-rules/self-assessment.md. ',
+		time: nextFriday(fromDate).toISOString(),
+		recurring: true,
+		recurrence: {
+			frequency: 'weekly',
+			interval: 1,
+		},
+	};
+}
+
+/**
+ * Ensure every active AI member has a Weekly Self-Assessment schedule event.
+ * Adds one (persisted) if missing; leaves existing ones untouched.
+ */
+async function ensureSelfAssessmentEvents(members, teamDir) {
+	let added = 0;
+	for (const member of members) {
+		const schedulePath = join(teamDir, 'members', member.name, 'schedule.json');
+		let schedule;
+		try {
+			schedule = JSON.parse(await readFile(schedulePath, 'utf-8'));
+		} catch {
+			schedule = { events: [] };
+		}
+
+		const hasAssessment = schedule.events.some(
+			e => e.title === SELF_ASSESSMENT_TITLE,
+		);
+		if (!hasAssessment) {
+			schedule.events.push(buildSelfAssessmentEvent(new Date()));
+			await writeFile(schedulePath, JSON.stringify(schedule, null, '\t') + '\n', 'utf-8');
+			added++;
+		}
+	}
+	if (added > 0) {
+		console.log(`[runner] Added self-assessment schedule event to ${added} member(s).`);
+	}
+}
+
 // ─── Logging ───────────────────────────────────────────────────────────────────
 
 async function ensureLogsDir(teamDir) {
@@ -998,6 +1057,10 @@ async function main() {
 			: 'No active AI members found in team/members.json.');
 		return;
 	}
+
+	// ── Ensure recurring system events ────────────────────────────────────────
+
+	await ensureSelfAssessmentEvents(allMembers, teamDir);
 
 	// ── Clerk only ────────────────────────────────────────────────────────────
 

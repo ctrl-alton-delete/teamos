@@ -22,6 +22,7 @@ teamos/
 ├── agent-rules/
 │   ├── cycle.md             # Rules for member cycle agents
 │   ├── clerk.md             # Rules for clerk agent
+│   ├── self-assessment.md   # Rules for weekly self-assessment
 │   └── root.md              # Section appended to host AGENTS.md
 ├── templates/
 │   ├── *.d.ts               # TypeScript type definitions
@@ -214,6 +215,22 @@ touch team/.stop
 ```
 
 The runner checks for this file before each cycle, between each member, and during idle waits. When found, it commits any completed work, removes the stop file, and exits. In loop mode, this exits the outer loop as well.
+
+### Weekly Self-Assessment
+
+The runner automatically ensures every active AI member has a recurring **Weekly Self-Assessment** schedule event (Fridays at 18:00 UTC). On startup, if a member's `schedule.json` lacks this event, the runner injects it.
+
+When the event fires, the member follows the rules in `teamos/agent-rules/self-assessment.md` to produce a reflective evaluation covering:
+
+- **Role fulfillment** — delivering on the job description
+- **Strategic vs tactical balance** — big-picture and day-to-day
+- **Cycle efficiency** — right-sized work, no wasted context
+- **Tool & document effectiveness** — building, maintaining, and reusing
+- **State/task/schedule hygiene** — keeping files concise and current
+- **Communication quality** — clear, actionable, appropriately targeted
+- **Project impact** — meaningful progress toward team goals
+
+Assessments are saved to `team/members/<name>/archives/self-assessments/assessment-YYYY-MM-DD.md`. After completing the assessment, the member bumps the event's `time` forward by one week to maintain the recurrence.
 
 ## Priority Cascade
 
