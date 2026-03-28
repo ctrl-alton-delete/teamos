@@ -24,7 +24,7 @@ Am I making good use of each cycle? Am I doing right-sized units of work — not
 Am I building reusable tools (scripts, libraries) where appropriate? Am I maintaining useful documentation in team/docs/ and team/data/? Am I referencing and improving existing tools rather than reinventing?
 
 ## State, Tasks & Schedule Hygiene (1-5)
-- **State**: Is my state.md concise, current, and useful — or bloated and stale?
+- **State**: Is my state.md concise, current, and useful — or bloated and stale?  Don't overly condense your state either or you'll "forget" things - if something doesn't need to be remembered every cycle, can you put it elsewhere and reference it?
 - **Tasks**: Are my todos well-prioritized, correctly labeled, and kept clean?
 - **Schedule**: Am I using schedule events effectively for deferred work instead of leaving unactionable items at high priority?
 
