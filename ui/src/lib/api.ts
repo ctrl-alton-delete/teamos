@@ -52,6 +52,8 @@ export const api = {
 	updateSchedule: (name: string, data: { events: unknown[] }) =>
 		put(`/api/members/${encodeURIComponent(name)}/schedule`, data),
 	memos: () => get<{ items: Memo[] }>('/api/memos'),
+	createMemo: (memo: { title: string; content: string; importance: string; authorName: string; projectCodes?: string[]; expiresAt?: string }) =>
+		post<Memo>('/api/memos', memo),
 	archiveMemo: (index: number) =>
 		post<{ archivedAs: string }>(`/api/memos/${index}/archive`, {}),
 	projects: () => get<{ projects: Project[] }>('/api/projects'),

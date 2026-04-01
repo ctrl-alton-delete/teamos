@@ -170,6 +170,25 @@ export function teamosApi(opts: ApiOptions): Plugin {
 		await unlink(join(teamDir, 'members', name, 'archives', filename));
 	}
 
+	async function createMemo(memo: { title: string; content: string; importance: string; authorName: string; projectCodes?: string[]; expiresAt?: string }) {
+		const memosPath = join(teamDir, 'memos.json');
+		const data = await readJson(memosPath, { items: [] });
+		const items: any[] = data.items ?? [];
+		const newMemo = {
+			title: memo.title,
+			content: memo.content,
+			postedAt: new Date().toISOString(),
+			...(memo.expiresAt ? { expiresAt: memo.expiresAt } : {}),
+			importance: memo.importance,
+			authorName: memo.authorName,
+			...(memo.projectCodes?.length ? { projectCodes: memo.projectCodes } : {}),
+		};
+		items.push(newMemo);
+		data.items = items;
+		await writeFile(memosPath, JSON.stringify(data, null, '\t'), 'utf-8');
+		return newMemo;
+	}
+
 	async function archiveMemo(index: number) {
 		const memosPath = join(teamDir, 'memos.json');
 		const data = await readJson(memosPath, { items: [] });
@@ -231,6 +250,11 @@ export function teamosApi(opts: ApiOptions): Plugin {
 
 					if (path === '/api/memos' && method === 'GET') {
 						return json(res, await readJson(join(teamDir, 'memos.json'), { items: [] }));
+					}
+
+					if (path === '/api/memos' && method === 'POST') {
+						const memo = JSON.parse(await readBody(req));
+						return json(res, await createMemo(memo), 201);
 					}
 
 					if (path.match(/^\/api\/memos\/(\d+)\/archive$/) && method === 'POST') {
