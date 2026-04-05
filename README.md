@@ -6,7 +6,7 @@ TeamOS lives as its own repository and integrates into any project, giving every
 
 ## How It Works
 
-Team members are defined in a `team/` workspace directory within the host project. Each member has a profile, current state, todo list, schedule, and inbox. A runner script processes members through priority-cascading cycles, invoking an AI agent (Claude, Cursor, Augment) for each.
+Team members are defined in a `team/` workspace directory within the host project. Each member has a profile, current state, todo list, schedule, and inbox. A runner script processes members through priority-cascading cycles, invoking an AI agent (Claude, Cursor, Augment, or OpenCode) for each.
 
 The runner provides full context — organization docs, news, projects, and the member's own files — then commits after each member completes. A clerk agent runs after each pass for cleanup (archiving old news, removing stale schedule items, etc.).
 
@@ -137,6 +137,9 @@ node teamos/scripts/run.mjs --member alice
 # Use a different agent
 node teamos/scripts/run.mjs --agent cursor
 
+# Use OpenCode agent
+node teamos/scripts/run.mjs --agent opencode
+
 # Don't auto-commit and keep looping
 node teamos/scripts/run.mjs --loop --no-commit
 ```
@@ -145,7 +148,7 @@ node teamos/scripts/run.mjs --loop --no-commit
 
 | Option | Default | Description |
 |---|---|---|
-| `--agent <name>` | `claude` | Agent adapter: `claude`, `cursor`, or `auggie` |
+| `--agent <name>` | `claude` | Agent adapter: `claude`, `cursor`, `auggie`, or `opencode` |
 | `--priority <level>` | `pressing` | Starting priority level |
 | `--member <name>` | — | Only run cycles for a specific member |
 | `--max-cycles <n>` | `10` | Maximum cycle passes per scheduling pass |

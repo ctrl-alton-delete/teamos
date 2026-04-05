@@ -22,7 +22,7 @@
  *   node teamos/scripts/run.mjs [options]
  *
  * Options:
- *   --agent <name>       Agent adapter: claude | auggie | cursor  (default: claude)
+ *   --agent <name>       Agent adapter: claude | auggie | cursor | opencode  (default: claude)
  *   --priority <level>   Starting priority: pressing | today | thisWeek | later
  *                                                                (default: pressing)
  *   --member <name>      Only run cycles for a specific member
@@ -190,6 +190,73 @@ function formatCursorJsonLine(line) {
 	return { text };
 }
 
+/**
+ * Format OpenCode stream-json lines to readable text.
+ * OpenCode emits: step_start, text, tool_call (started/completed), step_finish events.
+ * Returns { text, done? } — when done is true the agent has emitted its final result.
+ */
+function formatOpenCodeJsonLine(line) {
+	try {
+		const obj = JSON.parse(line);
+		
+		// Session initialization marker
+		if (obj.type === 'step_start') {
+			const sessionId = obj.sessionID?.slice(0, 8) ?? '?';
+			return { text: `[session ${sessionId}]\n` };
+		}
+		
+		// Text output from the assistant
+		if (obj.type === 'text') {
+			const text = obj.part?.text ?? '';
+			if (text) {
+				return { text: `\n[ASSISTANT]\n${text}\n` };
+			}
+		}
+		
+		// Tool invocations
+		if (obj.type === 'tool_call') {
+			const subtype = obj.part?.subtype ?? obj.subtype ?? '';
+			const toolInfo = obj.part?.toolInfo ?? {};
+			
+			if (subtype === 'started' || subtype === 'invoked') {
+				const toolName = toolInfo.name ?? '?';
+				const toolArg = JSON.stringify(toolInfo.input ?? {}).slice(0, 200);
+				return { text: `\n[TOOL:${toolName}] ${toolArg}\n` };
+			}
+			
+			if (subtype === 'completed' || subtype === 'succeeded') {
+				const result = toolInfo.result ?? {};
+				if (result.error) {
+					return { text: `  > error: ${result.error}\n` };
+				}
+				return { text: `  > done\n` };
+			}
+		}
+		
+		// Step completion — indicates the agent is done
+		if (obj.type === 'step_finish') {
+			const reason = obj.part?.reason ?? obj.reason ?? 'unknown';
+			const tokens = obj.part?.tokens ?? {};
+			const cost = tokens.cost != null ? ` | cost $${(tokens.cost / 1000000).toFixed(4)}` : '';
+			const dur = obj.part?.duration != null ? ` | ${(obj.part.duration / 1000).toFixed(1)}s` : '';
+			
+			// step_finish with reason 'stop' means the agent completed normally
+			const isError = reason === 'error' || reason === 'timeout';
+			const status = isError ? 'ERROR' : 'DONE';
+			
+			return {
+				text: `\n[RESULT ${status}${dur}${cost}]\n`,
+				done: true,
+				exitCode: isError ? 1 : 0,
+			};
+		}
+	} catch {
+		/* not JSON, pass through */
+	}
+	const text = line.endsWith('\n') ? line : line + '\n';
+	return { text };
+}
+
 // ─── Agent adapters ────────────────────────────────────────────────────────────
 // Each adapter returns { cmd, args } or { shellCmd } for spawning the agent process.
 // `instructionFile` is the path to a temp file containing the full prompt.
@@ -223,6 +290,16 @@ const agents = {
 			formatStream: formatCursorJsonLine,
 		};
 	},
+
+	opencode: (instructionFile) => ({
+		cmd: 'opencode',
+		args: [
+			'run',
+			'--format', 'json',
+			`Read and follow all instructions in the file: ${instructionFile}`,
+		],
+		formatStream: formatOpenCodeJsonLine,
+	}),
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -975,6 +1052,50 @@ async function buildClerkPrompt(teamDir, error) {
 
 // ─── Agent invocation ──────────────────────────────────────────────────────────
 
+/**
+ * Check if an agent command is available in PATH.
+ * For OpenCode, this also validates authentication.
+ */
+async function validateAgent(agentName) {
+	const adapter = agents[agentName];
+	if (!adapter) {
+		throw new Error(`Unknown agent: ${agentName}. Available: ${Object.keys(agents).join(', ')}`);
+	}
+
+	// Check if command exists
+	const { cmd, shellCmd } = adapter('', '', { cwd: process.cwd() });
+	const command = cmd || (shellCmd ? shellCmd.split(' ')[0] : null);
+
+	if (!command) {
+		throw new Error(`No command found for agent: ${agentName}`);
+	}
+
+	try {
+		execSync(`command -v ${command}`, { stdio: 'ignore', shell: true });
+	} catch {
+		if (agentName === 'opencode') {
+			throw new Error(
+				'OpenCode not found in PATH.\n' +
+				'  Install: npm install -g opencode-ai\n' +
+				'  Auth:    opencode auth login'
+			);
+		}
+		throw new Error(`Agent command not found: ${command}`);
+	}
+
+	// For OpenCode, validate authentication
+	if (agentName === 'opencode') {
+		try {
+			execSync('opencode auth status', { stdio: 'ignore' });
+		} catch {
+			throw new Error(
+				'OpenCode authentication required.\n' +
+				'  Run: opencode auth login'
+			);
+		}
+	}
+}
+
 /** Write prompt to a temp instruction file, spawn the agent, tee output to log. Returns exit code. */
 async function runAgent(agentName, prompt, cwd, logFile) {
 	const adapter = agents[agentName];
@@ -1123,7 +1244,7 @@ function printHelp() {
 		'Usage: node teamos/scripts/run.mjs [options]',
 		'',
 		'Options:',
-		'  --agent <name>       claude | auggie | cursor              (default: claude)',
+		'  --agent <name>       claude | auggie | cursor | opencode   (default: claude)',
 		'  --priority <level>   Starting priority level               (default: pressing)',
 		'  --member <name>      Only run cycles for a specific member',
 		'  --max-cycles <n>     Max cycle passes per scheduling pass  (default: 10)',
@@ -1436,6 +1557,14 @@ async function main() {
 
 	if (!await pathExists(teamDir)) {
 		console.error('team/ directory not found. Run `node teamos/scripts/init.mjs` first.');
+		process.exit(1);
+	}
+
+	// Validate agent is available
+	try {
+		await validateAgent(opts.agent);
+	} catch (err) {
+		console.error(`[runner] ${err.message}`);
 		process.exit(1);
 	}
 
