@@ -1090,17 +1090,8 @@ async function validateAgent(agentName) {
 		throw new Error(`Agent command not found: ${command}`);
 	}
 
-	// For OpenCode, validate authentication
-	if (agentName === 'opencode') {
-		try {
-			execSync('opencode auth status', { stdio: 'ignore' });
-		} catch {
-			throw new Error(
-				'OpenCode authentication required.\n' +
-				'  Run: opencode auth login'
-			);
-		}
-	}
+	// Note: For OpenCode, we skip auth status check here because
+	// the serve mode handles authentication internally during startup.
 }
 
 let opencodeServerProcess = null;
