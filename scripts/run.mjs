@@ -87,6 +87,7 @@ const MIN_INTERVAL_MS = {
 
 const CLERK_DAILY_MS = 24 * 60 * 60 * 1000;                // run clerk at most once per day
 const EFFICIENCY_ANALYSIS_MS = 7 * 24 * 60 * 60 * 1000;    // weekly efficiency analysis
+const OPENCODE_MAX_CYCLES_PER_SERVER = 5;                   // restart server every N cycles to manage context
 
 const DEFAULT_CYCLE_BUDGETS = {
 	thisWeek: 2,
@@ -673,7 +674,8 @@ async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, membe
 		].join('\n'));
 
 		const clerkPrompt = await buildClerkPrompt(teamDir, errorContext.length > 0 ? errorContext.join('\n') : null);
-		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, opencodeServerUrl);
+		const clerkServerUrl = await ensureOpenCodeServer(repoRoot);
+		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
 
 		if (clerkExit !== 0) {
 			console.error(`[runner] Clerk exited with code ${clerkExit}`);
@@ -705,7 +707,8 @@ async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, membe
 		].join('\n'));
 
 		const prompt = await buildEfficiencyPrompt(teamDir, logsDir, members);
-		const analysisExit = await runAgent(opts.agent, prompt, repoRoot, analysisLog, opencodeServerUrl);
+		const analysisServerUrl = await ensureOpenCodeServer(repoRoot);
+		const analysisExit = await runAgent(opts.agent, prompt, repoRoot, analysisLog, analysisServerUrl);
 
 		if (analysisExit !== 0) {
 			console.error(`[runner] Efficiency analysis exited with code ${analysisExit}`);
@@ -1096,9 +1099,15 @@ async function validateAgent(agentName) {
 
 let opencodeServerProcess = null;
 let opencodeServerUrl = null;
+let opencodeServerCycles = 0;
 
-async function startOpenCodeServer(cwd) {
-	if (opencodeServerProcess || opencodeServerUrl) return opencodeServerUrl;
+async function startOpenCodeServer(cwd, force = false) {
+	if (!force && (opencodeServerProcess || opencodeServerUrl)) {
+		return opencodeServerUrl;
+	}
+	if (force) {
+		await stopOpenCodeServer();
+	}
 
 	console.log('[runner] Starting opencode server...');
 	try {
@@ -1129,6 +1138,7 @@ async function startOpenCodeServer(cwd) {
 		});
 
 		opencodeServerUrl = await urlPromise;
+		opencodeServerCycles = 0;
 		console.log(`[runner] OpenCode server started at ${opencodeServerUrl}`);
 		return opencodeServerUrl;
 	} catch (err) {
@@ -1137,6 +1147,8 @@ async function startOpenCodeServer(cwd) {
 			opencodeServerProcess.kill();
 			opencodeServerProcess = null;
 		}
+		opencodeServerUrl = null;
+		opencodeServerCycles = 0;
 		return null;
 	}
 }
@@ -1145,9 +1157,19 @@ async function stopOpenCodeServer() {
 	if (opencodeServerProcess) {
 		console.log('[runner] Stopping opencode server...');
 		opencodeServerProcess.kill();
-		opencodeServerProcess = null;
-		opencodeServerUrl = null;
 	}
+	opencodeServerProcess = null;
+	opencodeServerUrl = null;
+	opencodeServerCycles = 0;
+}
+
+async function ensureOpenCodeServer(cwd) {
+	opencodeServerCycles++;
+	if (opencodeServerCycles > OPENCODE_MAX_CYCLES_PER_SERVER) {
+		console.log(`[runner] OpenCode server reached ${OPENCODE_MAX_CYCLES_PER_SERVER} cycle limit — restarting for fresh context`);
+		await startOpenCodeServer(cwd, true);
+	}
+	return opencodeServerUrl;
 }
 
 /** Write prompt to a temp instruction file, spawn the agent, tee output to log. Returns exit code. */
@@ -1447,7 +1469,8 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 		].join('\n'));
 
 		const prompt = await buildCyclePrompt(member, priority, teamDir);
-		const exitCode = await runAgent(opts.agent, prompt, repoRoot, currentLog, opencodeServerUrl);
+		const currentServerUrl = await ensureOpenCodeServer(repoRoot);
+		const exitCode = await runAgent(opts.agent, prompt, repoRoot, currentLog, currentServerUrl);
 
 		if (exitCode !== 0) {
 			lastError = `Agent exited with code ${exitCode} for member: ${member.name}`;
@@ -1674,7 +1697,8 @@ async function main() {
 		].join('\n'));
 
 		const clerkPrompt = await buildClerkPrompt(teamDir, null);
-		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, serverUrl);
+		const clerkServerUrl = await ensureOpenCodeServer(repoRoot);
+		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
 
 		if (clerkExit !== 0) {
 			console.error(`[runner] Clerk exited with code ${clerkExit}`);
