@@ -87,7 +87,7 @@ const MIN_INTERVAL_MS = {
 
 const CLERK_DAILY_MS = 24 * 60 * 60 * 1000;                // run clerk at most once per day
 const EFFICIENCY_ANALYSIS_MS = 7 * 24 * 60 * 60 * 1000;    // weekly efficiency analysis
-const OPENCODE_MAX_MEMBER_RUNS_PER_SERVER = 5;           // restart server every N member runs to manage context
+const OPENCODE_MAX_MEMBER_RUNS_PER_SERVER = 0;           // restart server every member run to manage fresh context
 
 const DEFAULT_CYCLE_BUDGETS = {
 	thisWeek: 2,
@@ -145,6 +145,8 @@ function formatClaudeJsonLine(line) {
 				text: `\n[RESULT ${status}${dur}${cost}]\n${obj.result ?? ''}\n`,
 				done: true,
 				exitCode: obj.is_error ? 1 : 0,
+				outputTokens: obj.usage?.output_tokens ?? 0,
+				sessionID: obj.session_id,
 			};
 		}
 	} catch {
@@ -203,7 +205,10 @@ function formatOpenCodeJsonLine(line) {
 		// Session initialization marker
 		if (obj.type === 'step_start') {
 			const sessionId = obj.sessionID?.slice(0, 8) ?? '?';
-			return { text: `[session ${sessionId}]\n` };
+			return { 
+				text: `[session ${sessionId}]\n`,
+				sessionID: obj.sessionID
+			};
 		}
 		
 		// Text output from the assistant
@@ -249,6 +254,8 @@ function formatOpenCodeJsonLine(line) {
 				text: `\n[RESULT ${status}${dur}${cost}]\n`,
 				done: true,
 				exitCode: isError ? 1 : 0,
+				outputTokens: tokens.output ?? 0,
+				sessionID: obj.sessionID
 			};
 		}
 	} catch {
@@ -263,18 +270,29 @@ function formatOpenCodeJsonLine(line) {
 // `instructionFile` is the path to a temp file containing the full prompt.
 
 const agents = {
-	claude: (instructionFile) => ({
+	claude: (instructionFile, _prompt, _opts, _serverUrl, sessionID) => ({
 		cmd: 'claude',
-		args: [
-			'-p',
-			'--dangerously-skip-permissions',
-			'--verbose',
-			'--no-session-persistence',
-			'--output-format', 'stream-json',
-			'--effort', 'high',
-			'--append-system-prompt-file', instructionFile,
-			'Execute the member cycle as described in the appended system prompt.',
-		],
+		args: sessionID 
+			? [
+				'-p',
+				'--dangerously-skip-permissions',
+				'--no-session-persistence',
+				'--output-format', 'stream-json',
+				'--effort', 'high',
+				'--append-system-prompt-file', instructionFile,
+				'--session', sessionID,
+				'Continue the cycle.',
+			]
+			: [
+				'-p',
+				'--dangerously-skip-permissions',
+				'--verbose',
+				'--no-session-persistence',
+				'--output-format', 'stream-json',
+				'--effort', 'high',
+				'--append-system-prompt-file', instructionFile,
+				'Execute the member cycle as described in the appended system prompt.',
+			],
 		formatStream: formatClaudeJsonLine,
 	}),
 
@@ -292,20 +310,28 @@ const agents = {
 		};
 	},
 
-	opencode: (instructionFile, prompt, opts, opencodeServerUrl) => ({
+	opencode: (instructionFile, prompt, opts, opencodeServerUrl, sessionID) => ({
 		cmd: 'opencode',
-		args: opencodeServerUrl
+		args: sessionID
 			? [
 				'run',
 				'--attach', opencodeServerUrl,
 				'--format', 'json',
-				`Read and follow all instructions in the file: ${instructionFile}`,
+				'--session', sessionID,
+				'You stopped before finishing. Please continue your task.',
 			]
-			: [
-				'run',
-				'--format', 'json',
-				`Read and follow all instructions in the file: ${instructionFile}`,
-			],
+			: opencodeServerUrl
+				? [
+					'run',
+					'--attach', opencodeServerUrl,
+					'--format', 'json',
+					`Read and follow all instructions in the file: ${instructionFile}`,
+				]
+				: [
+					'run',
+					'--format', 'json',
+					`Read and follow all instructions in the file: ${instructionFile}`,
+				],
 		formatStream: formatOpenCodeJsonLine,
 	}),
 };
@@ -675,7 +701,7 @@ async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, membe
 
 		const clerkPrompt = await buildClerkPrompt(teamDir, errorContext.length > 0 ? errorContext.join('\n') : null);
 		const clerkServerUrl = await ensureOpenCodeServer(repoRoot);
-		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
+		const { exitCode: clerkExit } = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
 
 		if (clerkExit !== 0) {
 			console.error(`[runner] Clerk exited with code ${clerkExit}`);
@@ -708,7 +734,7 @@ async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, membe
 
 		const prompt = await buildEfficiencyPrompt(teamDir, logsDir, members);
 		const analysisServerUrl = await ensureOpenCodeServer(repoRoot);
-		const analysisExit = await runAgent(opts.agent, prompt, repoRoot, analysisLog, analysisServerUrl);
+		const { exitCode: analysisExit } = await runAgent(opts.agent, prompt, repoRoot, analysisLog, analysisServerUrl);
 
 		if (analysisExit !== 0) {
 			console.error(`[runner] Efficiency analysis exited with code ${analysisExit}`);
@@ -1172,8 +1198,8 @@ async function ensureOpenCodeServer(cwd) {
 	return opencodeServerUrl;
 }
 
-/** Write prompt to a temp instruction file, spawn the agent, tee output to log. Returns exit code. */
-async function runAgent(agentName, prompt, cwd, logFile, serverUrl) {
+/** Write prompt to a temp instruction file, spawn the agent, tee output to log. Returns { exitCode, outputTokens, sessionID }. */
+async function runAgent(agentName, prompt, cwd, logFile, serverUrl, sessionID) {
 	const adapter = agents[agentName];
 	if (!adapter) {
 		console.error(`Unknown agent: ${agentName}. Available: ${Object.keys(agents).join(', ')}`);
@@ -1183,9 +1209,7 @@ async function runAgent(agentName, prompt, cwd, logFile, serverUrl) {
 	const instructionFile = logFile.replace(/\.log$/, '.prompt.md');
 	await writeFile(instructionFile, prompt, 'utf-8');
 
-	const adapterResult = agentName === 'opencode' && serverUrl
-		? adapter(instructionFile, prompt, { cwd }, serverUrl)
-		: adapter(instructionFile, prompt, { cwd });
+	const adapterResult = adapter(instructionFile, prompt, { cwd }, serverUrl, sessionID);
 	const logStream = createWriteStream(logFile, { flags: 'a' });
 	const { cmd, args, shellCmd, formatStream } = adapterResult;
 
@@ -1198,6 +1222,8 @@ async function runAgent(agentName, prompt, cwd, logFile, serverUrl) {
 			const child = spawn(...spawnArgs);
 			let idleTimer = null;
 			let resultExitCode = null;
+			let outputTokens = 0;
+			let finalSessionID = sessionID;
 			let settled = false;
 
 			function settle(code) {
@@ -1205,8 +1231,8 @@ async function runAgent(agentName, prompt, cwd, logFile, serverUrl) {
 				settled = true;
 				clearTimeout(idleTimer);
 				logStream.end(`\n[runner] Agent exited with code ${code}\n`);
-				logStream.once('finish', () => resolve(code));
-				logStream.once('error', () => resolve(code));
+				logStream.once('finish', () => resolve({ exitCode: code, outputTokens, sessionID: finalSessionID }));
+				logStream.once('error', () => resolve({ exitCode: code, outputTokens, sessionID: finalSessionID }));
 			}
 
 			function resetIdleTimer() {
@@ -1233,8 +1259,10 @@ async function runAgent(agentName, prompt, cwd, logFile, serverUrl) {
 				if (!formatStream) { writeOut(line + '\n'); return; }
 				const result = formatStream(line);
 				if (result.text) writeOut(result.text);
+				if (result.sessionID) finalSessionID = result.sessionID;
 				if (result.done) {
 					resultExitCode = result.exitCode ?? 0;
+					outputTokens = result.outputTokens ?? 0;
 					clearTimeout(idleTimer);
 					// Give agent 30s to exit after sending result
 					idleTimer = setTimeout(() => {
@@ -1328,6 +1356,7 @@ function printHelp() {
 		'  --max-cycles <n>     Max cycle passes per scheduling pass  (default: 10)',
 		'  --loop               Enable continuous scheduling loop',
 		'  --interval <min>     Minutes between passes                (default: 120, implies --loop)',
+		'  --qwen-local         Enable persistence prods for local Qwen models',
 		'  --push               Push to remote after each commit',
 		'  --no-commit          Skip automatic git commit after each cycle',
 		'  --no-clerk           Skip clerk agent after each pass',
@@ -1349,6 +1378,7 @@ function parseArgs(argv) {
 		member: null,
 		maxCycles: 10,
 		loop: false,
+		qwenLocal: false,
 		intervalMs: DEFAULT_INTERVAL_MS,
 		push: false,
 		noCommit: false,
@@ -1380,6 +1410,9 @@ function parseArgs(argv) {
 			case '--interval':
 				opts.intervalMs = parseInt(argv[++i], 10) * 60 * 1000;
 				opts.loop = true;
+				break;
+			case '--qwen-local':
+				opts.qwenLocal = true;
 				break;
 			case '--push':
 				opts.push = true;
@@ -1470,7 +1503,22 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 
 		const prompt = await buildCyclePrompt(member, priority, teamDir);
 		const currentServerUrl = await ensureOpenCodeServer(repoRoot);
-		const exitCode = await runAgent(opts.agent, prompt, repoRoot, currentLog, currentServerUrl);
+		
+		let { exitCode, outputTokens, sessionID } = await runAgent(opts.agent, prompt, repoRoot, currentLog, currentServerUrl);
+
+		// Qwen Persistence Prod: If output is empty and --qwen-local is set, try to nudge it.
+		if (opts.qwenLocal && exitCode === 0 && outputTokens === 0) {
+			console.log(`\n[runner] Detected empty response from ${member.name}. Triggering persistence prod...`);
+			let retries = 20;
+			while (retries > 0 && outputTokens === 0 && exitCode === 0) {
+				console.log(`  Continuation attempt (${21 - retries})...`);
+				const retryResult = await runAgent(opts.agent, 'Continue.', repoRoot, currentLog, currentServerUrl, sessionID);
+				exitCode = retryResult.exitCode;
+				outputTokens = retryResult.outputTokens;
+				sessionID = retryResult.sessionID;
+				retries--;
+			}
+		}
 
 		if (exitCode !== 0) {
 			lastError = `Agent exited with code ${exitCode} for member: ${member.name}`;
@@ -1698,7 +1746,7 @@ async function main() {
 
 		const clerkPrompt = await buildClerkPrompt(teamDir, null);
 		const clerkServerUrl = await ensureOpenCodeServer(repoRoot);
-		const clerkExit = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
+		const { exitCode: clerkExit } = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
 
 		if (clerkExit !== 0) {
 			console.error(`[runner] Clerk exited with code ${clerkExit}`);
