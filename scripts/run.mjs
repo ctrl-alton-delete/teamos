@@ -87,8 +87,6 @@ const MIN_INTERVAL_MS = {
 
 const CLERK_DAILY_MS = 24 * 60 * 60 * 1000;                // run clerk at most once per day
 const EFFICIENCY_ANALYSIS_MS = 7 * 24 * 60 * 60 * 1000;    // weekly efficiency analysis
-const OPENCODE_MAX_MEMBER_RUNS_PER_SERVER = 0;           // restart server every member run to manage fresh context
-
 const DEFAULT_CYCLE_BUDGETS = {
 	thisWeek: 2,
 	later:    1,
@@ -310,28 +308,13 @@ const agents = {
 		};
 	},
 
-	opencode: (instructionFile, prompt, opts, opencodeServerUrl, sessionID) => ({
+	opencode: (instructionFile) => ({
 		cmd: 'opencode',
-		args: sessionID
-			? [
-				'run',
-				'--attach', opencodeServerUrl,
-				'--format', 'json',
-				'--session', sessionID,
-				'You stopped before finishing. Please continue your task.',
-			]
-			: opencodeServerUrl
-				? [
-					'run',
-					'--attach', opencodeServerUrl,
-					'--format', 'json',
-					`Read and follow all instructions in the file: ${instructionFile}`,
-				]
-				: [
-					'run',
-					'--format', 'json',
-					`Read and follow all instructions in the file: ${instructionFile}`,
-				],
+		args: [
+			'run',
+			'--format', 'json',
+			`Read and follow all instructions in the file: ${instructionFile}`,
+		],
 		formatStream: formatOpenCodeJsonLine,
 	}),
 };
@@ -662,7 +645,7 @@ async function buildEfficiencyPrompt(teamDir, logsDir, members) {
  * Post-pass maintenance: automated housekeeping, conditional clerk, weekly efficiency analysis.
  * Replaces the per-cycle clerk invocation.
  */
-async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, members, schedulerState, passErrors, opencodeServerUrl }) {
+async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, members, schedulerState, passErrors }) {
 	const now = Date.now();
 
 	// 1. Automated housekeeping (lightweight JS — no agent)
@@ -700,8 +683,7 @@ async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, membe
 		].join('\n'));
 
 		const clerkPrompt = await buildClerkPrompt(teamDir, errorContext.length > 0 ? errorContext.join('\n') : null);
-		const clerkServerUrl = await ensureOpenCodeServer(repoRoot);
-		const { exitCode: clerkExit } = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
+		const { exitCode: clerkExit } = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog);
 
 		if (clerkExit !== 0) {
 			console.error(`[runner] Clerk exited with code ${clerkExit}`);
@@ -733,8 +715,7 @@ async function runMaintenance({ opts, teamDir, logsDir, version, repoRoot, membe
 		].join('\n'));
 
 		const prompt = await buildEfficiencyPrompt(teamDir, logsDir, members);
-		const analysisServerUrl = await ensureOpenCodeServer(repoRoot);
-		const { exitCode: analysisExit } = await runAgent(opts.agent, prompt, repoRoot, analysisLog, analysisServerUrl);
+		const { exitCode: analysisExit } = await runAgent(opts.agent, prompt, repoRoot, analysisLog);
 
 		if (analysisExit !== 0) {
 			console.error(`[runner] Efficiency analysis exited with code ${analysisExit}`);
@@ -1119,87 +1100,12 @@ async function validateAgent(agentName) {
 		throw new Error(`Agent command not found: ${command}`);
 	}
 
-	// Note: For OpenCode, we skip auth status check here because
+// Note: For OpenCode, we skip auth status check here because
 	// the serve mode handles authentication internally during startup.
 }
 
-let opencodeServerProcess = null;
-let opencodeServerUrl = null;
-let opencodeServerMemberRuns = 0;
-
-async function startOpenCodeServer(cwd, force = false) {
-	if (!force && (opencodeServerProcess || opencodeServerUrl)) {
-		return opencodeServerUrl;
-	}
-	if (force) {
-		await stopOpenCodeServer();
-	}
-
-	console.log('[runner] Starting opencode server...');
-	try {
-		opencodeServerProcess = spawn('opencode', ['serve', '--port', '0'], {
-			cwd,
-			stdio: ['ignore', 'pipe', 'pipe'],
-		});
-
-		const urlPromise = new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => reject(new Error('Server start timeout')), 30000);
-			opencodeServerProcess.stdout.on('data', (chunk) => {
-				const output = chunk.toString();
-				const match = output.match(/http:\/\/localhost:\d+/);
-				if (match) {
-					clearTimeout(timeout);
-					resolve(match[0]);
-				}
-			});
-			opencodeServerProcess.stderr.on('data', (chunk) => {
-				const output = chunk.toString();
-				process.stderr.write(`[opencode serve] ${output}`);
-				const match = output.match(/http:\/\/localhost:\d+/);
-				if (match) {
-					clearTimeout(timeout);
-					resolve(match[0]);
-				}
-			});
-		});
-
-		opencodeServerUrl = await urlPromise;
-		opencodeServerMemberRuns = 0;
-		console.log(`[runner] OpenCode server started at ${opencodeServerUrl}`);
-		return opencodeServerUrl;
-	} catch (err) {
-		console.error(`[runner] Failed to start opencode server: ${err.message}`);
-		if (opencodeServerProcess) {
-			opencodeServerProcess.kill();
-			opencodeServerProcess = null;
-		}
-		opencodeServerUrl = null;
-		opencodeServerMemberRuns = 0;
-		return null;
-	}
-}
-
-async function stopOpenCodeServer() {
-	if (opencodeServerProcess) {
-		console.log('[runner] Stopping opencode server...');
-		opencodeServerProcess.kill();
-	}
-	opencodeServerProcess = null;
-	opencodeServerUrl = null;
-	opencodeServerMemberRuns = 0;
-}
-
-async function ensureOpenCodeServer(cwd) {
-	opencodeServerMemberRuns++;
-	if (opencodeServerMemberRuns > OPENCODE_MAX_MEMBER_RUNS_PER_SERVER) {
-		console.log(`[runner] OpenCode server reached ${OPENCODE_MAX_MEMBER_RUNS_PER_SERVER} member run limit — restarting for fresh context`);
-		await startOpenCodeServer(cwd, true);
-	}
-	return opencodeServerUrl;
-}
-
 /** Write prompt to a temp instruction file, spawn the agent, tee output to log. Returns { exitCode, outputTokens, sessionID }. */
-async function runAgent(agentName, prompt, cwd, logFile, serverUrl, sessionID) {
+async function runAgent(agentName, prompt, cwd, logFile) {
 	const adapter = agents[agentName];
 	if (!adapter) {
 		console.error(`Unknown agent: ${agentName}. Available: ${Object.keys(agents).join(', ')}`);
@@ -1209,7 +1115,7 @@ async function runAgent(agentName, prompt, cwd, logFile, serverUrl, sessionID) {
 	const instructionFile = logFile.replace(/\.log$/, '.prompt.md');
 	await writeFile(instructionFile, prompt, 'utf-8');
 
-	const adapterResult = adapter(instructionFile, prompt, { cwd }, serverUrl, sessionID);
+	const adapterResult = adapter(instructionFile);
 	const logStream = createWriteStream(logFile, { flags: 'a' });
 	const { cmd, args, shellCmd, formatStream } = adapterResult;
 
@@ -1502,9 +1408,8 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 		].join('\n'));
 
 		const prompt = await buildCyclePrompt(member, priority, teamDir);
-		const currentServerUrl = await ensureOpenCodeServer(repoRoot);
-		
-		let { exitCode, outputTokens, sessionID } = await runAgent(opts.agent, prompt, repoRoot, currentLog, currentServerUrl);
+
+		let { exitCode, outputTokens, sessionID } = await runAgent(opts.agent, prompt, repoRoot, currentLog);
 
 		// Qwen Persistence Prod: If output is empty and --qwen-local is set, try to nudge it.
 		if (opts.qwenLocal && exitCode === 0 && outputTokens === 0) {
@@ -1512,10 +1417,9 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 			let retries = 20;
 			while (retries > 0 && outputTokens === 0 && exitCode === 0) {
 				console.log(`  Continuation attempt (${21 - retries})...`);
-				const retryResult = await runAgent(opts.agent, 'Continue.', repoRoot, currentLog, currentServerUrl, sessionID);
+				const retryResult = await runAgent(opts.agent, 'Continue.', repoRoot, currentLog);
 				exitCode = retryResult.exitCode;
 				outputTokens = retryResult.outputTokens;
-				sessionID = retryResult.sessionID;
 				retries--;
 			}
 		}
@@ -1549,7 +1453,7 @@ async function runCycle({ membersWithWork, priority, cycleCount, opts, teamDir, 
 
 // ─── Pass execution ────────────────────────────────────────────────────────────
 
-async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, schedulerState, useTimeout, opencodeServerUrl }) {
+async function runPass({ opts, teamDir, logsDir, version, repoRoot, members, schedulerState, useTimeout }) {
 	const { lastServedAt, lastServedMember } = schedulerState;
 	const startTime = Date.now();
 	let currentPriority = opts.priority;
@@ -1695,23 +1599,6 @@ async function main() {
 		process.exit(1);
 	}
 
-	// Start opencode server for persistent authentication (if using opencode)
-	let serverUrl = null;
-	if (opts.agent === 'opencode') {
-		serverUrl = await startOpenCodeServer(repoRoot);
-	}
-
-	// Ensure server is stopped on exit
-	process.on('exit', () => stopOpenCodeServer());
-	process.on('SIGINT', async () => {
-		await stopOpenCodeServer();
-		process.exit(128 + 2);
-	});
-	process.on('SIGTERM', async () => {
-		await stopOpenCodeServer();
-		process.exit(128 + 15);
-	});
-
 	const allMembers = await loadMembers(teamDir);
 	const members = opts.member
 		? allMembers.filter(m => m.name === opts.member)
@@ -1745,8 +1632,7 @@ async function main() {
 		].join('\n'));
 
 		const clerkPrompt = await buildClerkPrompt(teamDir, null);
-		const clerkServerUrl = await ensureOpenCodeServer(repoRoot);
-		const { exitCode: clerkExit } = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog, clerkServerUrl);
+		const { exitCode: clerkExit } = await runAgent(opts.agent, clerkPrompt, repoRoot, clerkLog);
 
 		if (clerkExit !== 0) {
 			console.error(`[runner] Clerk exited with code ${clerkExit}`);
@@ -1823,7 +1709,7 @@ async function main() {
 
 			const result = await runPass({
 				opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
-				useTimeout: false, opencodeServerUrl: serverUrl,
+				useTimeout: false,
 			});
 
 
@@ -1831,7 +1717,7 @@ async function main() {
 			if (!result.stopped) {
 				await runMaintenance({
 					opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
-					passErrors: result.passErrors, opencodeServerUrl: serverUrl,
+					passErrors: result.passErrors,
 				});
 			}
 			console.log(`\n[runner] Pass ${passNum} complete — ${result.cycleCount} cycle(s), ${result.totalMemberRuns} member run(s).`);
@@ -1865,12 +1751,12 @@ async function main() {
 	} else {
 		const result = await runPass({
 			opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
-			useTimeout: true, opencodeServerUrl: serverUrl,
+			useTimeout: true,
 		});
 
 		await runMaintenance({
 			opts, teamDir, logsDir, version, repoRoot, members, schedulerState,
-			passErrors: result.passErrors, opencodeServerUrl: serverUrl,
+			passErrors: result.passErrors,
 		});
 
 		await saveSchedulerState(logsDir, schedulerState);
