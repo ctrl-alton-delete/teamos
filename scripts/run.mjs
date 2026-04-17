@@ -1136,7 +1136,7 @@ async function runAgent(agentName, prompt, cwd, logFile) {
 			let idleTimer = null;
 			let resultExitCode = null;
 			let outputTokens = 0;
-			let finalSessionID = sessionID;
+			let finalSessionID = null;
 			let settled = false;
 
 			function settle(code) {
