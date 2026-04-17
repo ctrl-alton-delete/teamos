@@ -1120,8 +1120,8 @@ async function runAgent(agentName, prompt, cwd, logFile) {
 	const { cmd, args, shellCmd, formatStream } = adapterResult;
 
 	const spawnArgs = shellCmd
-		? [shellCmd, [], { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: true }]
-		: [cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: false }];
+		? [shellCmd, [], { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: true, env: { ...process.env } }]
+		: [cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: false, env: { ...process.env } }];
 
 	try {
 		return await new Promise((resolve, reject) => {
