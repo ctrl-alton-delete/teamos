@@ -1080,7 +1080,7 @@ async function validateAgent(agentName) {
 	}
 
 	// Check if command exists
-	const { cmd, shellCmd } = adapter('', '', { cwd: process.cwd() }, null);
+	const { cmd, shellCmd } = adapter('');
 	const command = cmd || (shellCmd ? shellCmd.split(' ')[0] : null);
 
 	if (!command) {
