@@ -1119,13 +1119,6 @@ async function runAgent(agentName, prompt, cwd, logFile) {
 	const logStream = createWriteStream(logFile, { flags: 'a' });
 	const { cmd, args, shellCmd, formatStream } = adapterResult;
 
-	console.log(`[runner] Spawning agent: ${agentName}`);
-	console.log(`[runner]   cwd: ${cwd}`);
-	console.log(`[runner]   cmd: ${shellCmd || cmd}`);
-	console.log(`[runner]   args: ${shellCmd ? '(shell)' : JSON.stringify(args)}`);
-	console.log(`[runner]   env.HOME: ${process.env.HOME}`);
-	console.log(`[runner]   env.OPENCODE_CONFIG_DIR: ${process.env.OPENCODE_CONFIG_DIR}`);
-
 	const spawnArgs = shellCmd
 		? [shellCmd, [], { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: true, env: { ...process.env } }]
 		: [cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: false, env: { ...process.env } }];
